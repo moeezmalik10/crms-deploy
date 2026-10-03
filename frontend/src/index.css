@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+* {
+  font-family:
+    "Lucida Sans", "Lucida Sans Regular", "Lucida Grande",
+    "Lucida Sans Unicode", Geneva, Verdana, sans-serif;
+}
+body {
+  margin: 0;
+  padding: 0;
+}
+.main-container {
+  @apply flex justify-center items-center min-h-[525px] md:min-h-[625px];
+}
+.outer-container {
+  @apply bg-[rgb(216,216,216)] shadow-2xl rounded-2xl gap-6 w-80 
+    flex flex-col 
+      md:w-150 px-4 py-10   ;
+}
+.outer-containers {
+  @apply bg-[rgb(216,216,216)] shadow-2xl rounded-2xl gap-6 w-80 
+    flex flex-col
+      mb-4 px-4 py-10   ;
+}
+input[type="text"] {
+  @apply  bg-[rgb(216,216,216)] rounded-lg md:w-[85%] p-4 w-full outline-none border border-gray-400 focus:border-indigo-500 text-sm;
+}
+input[type="password"] {
+  @apply bg-[rgb(216,216,216)] rounded-lg p-4 w-full outline-none border border-gray-400 focus:border-indigo-500 text-sm;
+}
+input[type="number"] {
+  @apply bg-[rgb(216,216,216)] rounded-lg p-4 md:w-[85%] w-full outline-none border border-gray-400 focus:border-indigo-500 text-sm;
+}
+input[type="option"] {
+  @apply  bg-[rgb(216,216,216)] rounded-lg p-4 md:w-[85%] w-full outline-none border border-gray-400 focus:border-indigo-500 text-sm;
+}
+
+
+/* Horizontal only modern scrollbar */
+.custom-scrollbar {
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f3f4f6;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  height: 8px;
+  width: 0px; /* hides vertical scrollbar */
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #f3f4f6;
+  border-radius: 999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.custom-scrollbar::-webkit-scrollbar-vertical {
+  display: none;
+}
+
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
+  display: none;
+}
+
+input[type="password"]::-webkit-textfield-decoration-container {
+  display: none;
+}
