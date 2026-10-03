@@ -63,8 +63,24 @@ function Check-Ids {
     if (-not (Need "IdsUrl")) { return }
     try { $null = Get-Url ((U "IdsUrl") + "/health"); Write-Ok "/health -> ok" }
     catch { Fail "cannot open $(U 'IdsUrl')/health : $($_.Exception.Message) -> see Render -> crms-ids -> Logs"; return }
-    try { $r = Get-Url ((U "IdsUrl") + "/blacklisted"); if ($r.Content.Trim().StartsWith('[')) { Write-Ok "/blacklisted -> list (IDS reaches Supabase)" } else { Fail "IDS cannot read Supabase: $($r.Content) -> check SUPABASE_URL / SUPABASE_KEY on crms-ids" } }
-    catch { Fail "/blacklisted failed: $($_.Exception.Message) -> check SUPABASE_URL / SUPABASE_KEY on crms-ids" }
+    $readOk = $false
+    try { $r = Get-Url ((U "IdsUrl") + "/blacklisted"); if ($r.Content.Trim().StartsWith('[')) { Write-Ok "/blacklisted -> list (IDS reaches Supabase)"; $readOk = $true } else { Fail "IDS cannot read Supabase: $($r.Content)" } }
+    catch { Fail "/blacklisted failed: $($_.Exception.Message)" }
+    if (-not $readOk) {
+        # Ask the IDS what it sees (URL, kind of key, Supabase's answer). The key itself is never shown.
+        try {
+            $d = Invoke-RestMethod -Uri ((U "IdsUrl") + "/health/supabase") -TimeoutSec 60
+            Write-Host "    What crms-ids sees:" -ForegroundColor Yellow
+            Write-Host "      SUPABASE_URL : $($d.supabase_url)"
+            Write-Host "      SUPABASE_KEY : $($d.supabase_key)  (length $($d.supabase_key_length))"
+            if ($d.rest_status) { Write-Host "      Supabase said: $($d.rest_status) $($d.rest_reply)" }
+            if ($d.error)   { Write-Host "      Error        : $($d.error)" }
+            if ($d.warning) { Write-Host "      Warning      : $($d.warning)" -ForegroundColor Yellow }
+            Write-Host "      Result       : $($d.result)" -ForegroundColor Yellow
+        } catch {
+            Write-Warn "this IDS has no /health/supabase yet - push the updated ids folder (git add . ; git commit -m 'IDS fix' ; git push), wait for Live, check again"
+        }
+    }
     try {
         $d = Invoke-RestMethod -Method Post -Uri ((U "IdsUrl") + "/detect") -ContentType "application/json" -Body '{"email":"health-check@uog.edu.pk","Destination Port":80,"Flow Duration":100}' -TimeoutSec 100
         Write-Ok "/detect works (prediction: $($d.prediction))"

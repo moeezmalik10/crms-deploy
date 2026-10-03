@@ -1,26 +1,27 @@
 import os
 import requests
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+from ids.settings import SUPABASE_URL, SUPABASE_KEY, HEADERS
 
-headers = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
-}
+headers = HEADERS
 
 def is_blacklisted(ip_address):
     url = f"{SUPABASE_URL}/rest/v1/blacklisted_ips?ip_address=eq.{ip_address}"
-    response = requests.get(url, headers=headers)
-
-    data = response.json()
-    return len(data) > 0
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        data = response.json()
+        return response.status_code == 200 and len(data) > 0
+    except Exception as e:
+        print("Blacklist check failed:", type(e).__name__, e)
+        return False
 
 
 def blacklist_ip(ip_address):
     url = f"{SUPABASE_URL}/rest/v1/blacklisted_ips"
 
-    requests.post(url, json={
-        "ip_address": ip_address
-    }, headers=headers)
+    try:
+        requests.post(url, json={
+            "ip_address": ip_address
+        }, headers=headers, timeout=20)
+    except Exception as e:
+        print("Blacklist save failed:", type(e).__name__, e)

@@ -1,19 +1,17 @@
 import os
 import requests
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+from ids.settings import SUPABASE_URL, SUPABASE_KEY, HEADERS
 
-headers = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
-}
+headers = HEADERS
 
 def count_attacks(ip_address):
     url = f"{SUPABASE_URL}/rest/v1/intrusion_logs?ip_address=eq.{ip_address}"
 
-    response = requests.get(url, headers=headers)
-    data = response.json()
-
-    return len(data)
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        data = response.json()
+        return len(data) if response.status_code == 200 else 0
+    except Exception as e:
+        print("Attack count failed:", type(e).__name__, e)
+        return 0

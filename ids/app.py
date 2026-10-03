@@ -20,5 +20,12 @@ app.register_blueprint(blacklist_bp)
 def health():
     return {"status": "ok"}
 
+
+@app.route("/health/supabase")
+def health_supabase():
+    # Shows whether SUPABASE_URL / SUPABASE_KEY on Render work. Never shows the key.
+    from ids.settings import diagnose
+    return diagnose()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5001)))
