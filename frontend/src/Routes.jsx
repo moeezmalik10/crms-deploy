@@ -1,0 +1,65 @@
+import { createBrowserRouter } from "react-router"
+import App from "./App"
+import LoginPage from "../Components/LoginPage/LoginPage"
+import AdminPageLayout from "../Components/Admin_Page_Components/AdminPageLayout"
+import AdminProfile from "../Components/Admin_Page_Components/AdminProfile"
+import History from "../Components/Admin_Page_Components/History"
+import ManageUsers from "../Components/Admin_Page_Components/ManageUsers"
+import Machine from "../Components/Admin_Page_Components/Machines"
+
+
+import StudentPageLayout from "../Components/StudentComponents/Student_page_layout"
+import StudentProfile from "../Components/StudentComponents/StudentProfile"
+import StudentSessionLink from "../Components/StudentComponents/StudentSessionLink"
+import StudentSessions from "../Components/StudentComponents/StudentSessions"
+import NewRequests from "../Components/StudentComponents/NewRequest"
+import MLTask from "../Components/StudentComponents/MLTask"
+import MLResults from "../Components/StudentComponents/MLResults"
+
+import AdminSecurityDashboard from "../Components/IDS/AdminSecurityDashboard"
+import BlacklistDashboard from "../Components/IDS/BlacklistDashboard"
+
+import { Component } from "react"
+
+const Routes = createBrowserRouter([
+    {
+    path:"/",
+    Component:LoginPage,
+},
+  { path:"/studentpage",
+   Component: StudentPageLayout,
+ children:[
+     {index: true , Component: NewRequests, },
+        {path:"studentprofile" , Component: StudentProfile, },
+        {path:"newrequest" , Component: NewRequests, },
+        {path:"studentsessionlink" , Component: StudentSessionLink, },
+        {path:"studentsessions" , Component: StudentSessions, },
+        {path:"mltaskrequest" , Component: MLTask, },
+   { path:"mltaskresults", Component: MLResults },
+                { path:"mltaskresults/:jobId" , Component: MLResults }
+
+    ]
+},
+
+
+  { path:"/adminpage",
+   Component: AdminPageLayout,
+    children:[
+             {index: true , Component: Machine, },
+             {path:"machines" , Component: Machine, },
+             {path:"history" , Component: History, },
+        {path:"manageusers" , Component: ManageUsers, },
+        {path:"adminprofile" , Component: AdminProfile, },
+        {path:"securitydashboard", Component: AdminSecurityDashboard },
+        {path:"blacklistdashboard", Component: BlacklistDashboard},
+        
+        
+    ]
+},
+])
+
+
+
+
+
+export default  Routes

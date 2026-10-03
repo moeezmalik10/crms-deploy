@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+ids/ids_multiclass_model.pkl
+ids/__pycache__/
+routes/__pycache__/

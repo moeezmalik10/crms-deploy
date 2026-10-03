@@ -1,0 +1,11 @@
+venv/
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+.env
+dist/
+*.log
+outputs/
+storage/
+tools/deploy_config.ps1.bak
