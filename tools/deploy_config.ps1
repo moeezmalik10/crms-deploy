@@ -3,8 +3,8 @@
 #  (No passwords here - this file is safe to keep in GitHub.)
 # =====================================================================
 $DEPLOY = @{
-    BackendUrl  = ""   # step 3, e.g. https://crms-backend.onrender.com
-    IdsUrl      = ""   # step 3, e.g. https://crms-ids.onrender.com
+    BackendUrl  = "https://crms-backend-cusl.onrender.com"   # step 3, e.g. https://crms-backend.onrender.com
+    IdsUrl      = "https://crms-ids.onrender.com"   # step 3, e.g. https://crms-ids.onrender.com
     FrontendUrl = ""   # step 4, e.g. https://crms-deploy.vercel.app
 }
 

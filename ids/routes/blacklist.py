@@ -4,22 +4,24 @@ import requests
 
 blacklist_bp = Blueprint("blacklist", __name__)
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+from ids.settings import SUPABASE_URL, SUPABASE_KEY, HEADERS, diagnose
 
-headers = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
-}
+headers = HEADERS
 
 # Get all blacklisted IPs
 @blacklist_bp.route("/blacklisted", methods=["GET"])
 def get_blacklisted():
     url = f"{SUPABASE_URL}/rest/v1/blacklisted_ips?select=*"
 
-    response = requests.get(url, headers=headers)
-    return jsonify(response.json())
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        data = response.json()
+        if response.status_code == 200:
+            return jsonify(data)
+    except Exception as e:
+        print("Supabase read failed:", type(e).__name__, e)
+    # Explain the problem instead of a bare 500 (details also at /health/supabase)
+    return jsonify(diagnose()), 502
 
 
 # Remove blocked IP
