@@ -5,7 +5,7 @@
 $DEPLOY = @{
     BackendUrl  = "https://crms-backend-cusl.onrender.com"   # step 3, e.g. https://crms-backend.onrender.com
     IdsUrl      = "https://crms-ids.onrender.com"   # step 3, e.g. https://crms-ids.onrender.com
-    FrontendUrl = ""   # step 4, e.g. https://crms-deploy.vercel.app
+    FrontendUrl = "https://crms-deploy.vercel.app/"   # step 4, e.g. https://crms-deploy.vercel.app
 }
 
 # Test login used by the checks (the starter admin from database\supabase_setup.sql)

@@ -160,10 +160,16 @@ def register_node():
             "total_cores":  psutil.cpu_count(),
             "total_ram_mb": psutil.virtual_memory().total / (1024 * 1024),
         }
-        requests.post(REGISTER_URL, json=payload, timeout=10)
-        print("[SUCCESS] Node registered successfully")
+        # Render's free backend sleeps; the first request can take about a minute to wake it.
+        r = requests.post(REGISTER_URL, json=payload, timeout=90)
+        if r.status_code == 200 and "registered" in r.text:
+            print(f"[SUCCESS] Node {payload['name']} registered with {BACKEND_BASE_URL}")
+            return True
+        print(f"[FAILED] Register failed: HTTP {r.status_code} from {REGISTER_URL}")
+        print("         Is backend_url.txt exactly your crms-backend address from Render?")
     except Exception as e:
         print(f"[FAILED] Register failed: {e}")
+    return False
 
 
 # =====================
@@ -172,8 +178,14 @@ def register_node():
 def heartbeat_loop():
     while True:
         try:
-            requests.post(HEARTBEAT_URL, json=build_payload(), timeout=30)
-            print("Heartbeat sent")
+            r = requests.post(HEARTBEAT_URL, json=build_payload(), timeout=60)
+            if r.status_code == 200:
+                print(f"Heartbeat sent ({datetime.now().strftime('%H:%M:%S')})")
+            elif r.status_code == 404 and "not registered" in r.text:
+                print("Heartbeat refused: node not registered - registering again")
+                register_node()
+            else:
+                print(f"Heartbeat FAILED: HTTP {r.status_code} from {HEARTBEAT_URL} - check backend_url.txt")
         except Exception as e:
             print(f"Heartbeat failed: {e}")
         time.sleep(HEARTBEAT_INTERVAL)
@@ -688,9 +700,14 @@ if __name__ == "__main__":
     print(f"Default VM   : {DEFAULT_VM}")
     print(f"Task Map     : {TASK_VM_MAP}")
     print(f"Heartbeat    : every {HEARTBEAT_INTERVAL} seconds")
+    print(f"Node name    : {socket.gethostname()}")
     print("=" * 40)
 
-    register_node()
+    for attempt in range(1, 4):
+        if register_node():
+            break
+        print(f"         retrying in 15 seconds ({attempt}/3)...")
+        time.sleep(15)
 
     threading.Thread(target=heartbeat_loop,       daemon=True).start()
     threading.Thread(target=command_polling_loop, daemon=True).start()
@@ -700,4 +717,8 @@ if __name__ == "__main__":
     print("Flask running on 0.0.0.0:5000")
     print("=" * 40)
 
-    app.run(host="0.0.0.0", port=5000)
+    try:
+        app.run(host="0.0.0.0", port=5000)
+    except OSError as e:
+        print(f"[FAILED] Port 5000 is already in use ({e}).")
+        print("         Another agent (for example the local one) is still running - close it and start again.")

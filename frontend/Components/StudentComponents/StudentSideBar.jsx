@@ -101,6 +101,16 @@ export default function StudentSideBar() {
                 >
                   Remote Link
                 </NavLink>
+                {/* ================================Share this device======== */}
+                <NavLink
+                 onClick={() => setIsOpen(false)}
+                  className={({ isActive }) => ` p-3 rounded-lg tracking-wider text-start w-full transition-all duration-300
+                ${isActive ? " bg-[#b3b3b3ee] text-black font-bold" : "text-white bg-[#212121]"}
+                `}
+                to={"sharedevice"}
+                >
+                  Share this device
+                </NavLink>
                 {/* ================================Sessions======== */}
                 <NavLink
                  onClick={() => setIsOpen(false)}

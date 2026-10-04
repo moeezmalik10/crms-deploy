@@ -14,9 +14,12 @@ def _nodes_meeting_ml_profile(nodes):
     # In a real system, we might want dynamic profiles or more granular requirements per ML model type.
     prof = TASK_PROFILES.get("ml_node", {"cpu": 2, "ram": 4096})
     need_cpu, need_ram = prof["cpu"], prof["ram"]
+    # Browser nodes ("WEB-..." phones / tablets joined from the Share this device page) cannot
+    # run scikit-learn, so ML chunks only go to PCs running the Python agent.
     return [
         n for n in nodes
         if (n.total_cores or 0) >= need_cpu and (n.total_ram_mb or 0) >= need_ram
+        and not (n.name or "").upper().startswith("WEB-")
     ]
 
 def _safe_task_message_json(msg):
