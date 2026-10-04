@@ -93,8 +93,13 @@ const fetchUsers = async () => {
     });
 
     if (!res.ok) {
-      const err = await res.json();
-      alert(err.error || "Failed to create user");
+      let err = {};
+      try { err = await res.json(); } catch { /* not JSON */ }
+      if (res.status === 401 || res.status === 422) {
+        alert("Your login has expired. Please log out and log in again.");
+      } else {
+        alert(err.error || err.msg || `Failed to create user (server error ${res.status})`);
+      }
       return;
     }
 
@@ -108,8 +113,8 @@ const fetchUsers = async () => {
 
     fetchUsers();
 
-  } catch {
-    alert("Failed to create user");
+  } catch (e) {
+    alert(`Failed to create user: cannot reach the server (${e.message}). If Render was asleep, wait a minute and try again.`);
   }
 };
   useEffect(() => {

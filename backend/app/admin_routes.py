@@ -4,7 +4,8 @@ from werkzeug.security import generate_password_hash
 from app import db
 from app.models import User, Node, NodeMetrics, TaskRequest, MLResult
 from app.allocation_engine import stop_task
-from sqlalchemy import or_
+from sqlalchemy import or_, text
+from sqlalchemy.exc import IntegrityError
 from flask_jwt_extended import jwt_required, get_jwt
 
 admin_bp = Blueprint("admin", __name__)
@@ -30,21 +31,47 @@ def create_user():
     if claims.get("role") != "admin":
         return jsonify({"error": "Admin access required"}), 403
     
-    data = request.get_json()
-    email = data.get("email")
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    role = data.get("role") or "student"
     if not email:
         return jsonify({"error": "email required"}), 400
     
-    if "@uog.edu.pk" not in email:
+    if not email.endswith("@uog.edu.pk"):
         return jsonify({"error": "Only @uog.edu.pk emails are allowed"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    if role not in ("student", "admin"):
+        return jsonify({"error": "Role must be student or admin"}), 400
 
-    user = User(
-        email=email,
-        password=generate_password_hash(data.get("password", "123")),
-        role=data.get("role", "student")
-    )
-    db.session.add(user)
-    db.session.commit()
+    # The username is the part before @, so both must be unused
+    username = email.split("@")[0]
+    if User.query.filter(or_(db.func.lower(User.email) == email, User.username == username)).first():
+        return jsonify({"error": f"A user with email {email} (username {username}) already exists"}), 409
+
+    def insert():
+        user = User(email=email, password=generate_password_hash(password), role=role)
+        db.session.add(user)
+        db.session.commit()
+        return user
+
+    try:
+        user = insert()
+    except IntegrityError as e:
+        db.session.rollback()
+        if "user_pkey" not in str(e.orig):
+            return jsonify({"error": f"Could not create user: {e.orig}"}), 409
+        # Rows were imported with fixed ids, so the id counter is behind. Move it past the
+        # highest id and try once more.
+        db.session.execute(text(
+            "SELECT setval(pg_get_serial_sequence('\"user\"', 'id'), (SELECT COALESCE(MAX(id), 1) FROM \"user\"))"))
+        db.session.commit()
+        try:
+            user = insert()
+        except IntegrityError as e2:
+            db.session.rollback()
+            return jsonify({"error": f"Could not create user: {e2.orig}"}), 409
     return jsonify({"message": "User created", "id": user.id})
 
 @admin_bp.route("/admin/users/<int:user_id>/reset_password", methods=["POST"])
