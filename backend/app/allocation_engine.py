@@ -63,6 +63,11 @@ def allocate_task(task_id):
             Node.last_heartbeat > timeout_limit
         ).with_for_update(of=Node).all()
 
+        # Browser devices ("WEB-...", from the Share this device page) can only be reserved
+        # physically; remote (VM) sessions need a lab PC running the Python agent.
+        if task.mode != "physical":
+            nodes = [n for n in nodes if not (n.name or "").upper().startswith("WEB-")]
+
         if not nodes:
             task.status = "pending"
             log_event(task.id, None, "queued", "No online nodes available. Queued.")
