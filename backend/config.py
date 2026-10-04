@@ -1,4 +1,4 @@
-from datetime import timezone
+from datetime import timezone, timedelta
 import os
 
 class Config:
@@ -12,6 +12,8 @@ class Config:
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
     if not JWT_SECRET_KEY:
         raise ValueError("JWT_SECRET_KEY environment variable is not set")
+    # Stay logged in for a working day (the library default is only 15 minutes)
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=8)
 
     # SUPABASE SPECIFIC CONNECTION STABILITY SETTINGS
     SQLALCHEMY_ENGINE_OPTIONS = {
