@@ -124,7 +124,7 @@ export default function History() {
               >
                 <td className="py-3">{s.task_id}</td>
                 <td>{s.student_name}</td>
-                <td>{s.machine}</td>
+                <td>{s.machine}{s.mode && <div className="text-[11px] text-gray-500 capitalize">{s.mode}</div>}</td>
                 <td>{s.start_time}</td>
 
                 <td>
@@ -135,6 +135,9 @@ export default function History() {
                   >
                     {s.status}
                   </span>
+                  {s.reason && (
+                    <div className="text-[11px] text-gray-500 mt-1 max-w-[220px] mx-auto break-words">{s.reason}</div>
+                  )}
                 </td>
 
                 <td>

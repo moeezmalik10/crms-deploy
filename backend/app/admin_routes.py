@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone, timedelta
 from werkzeug.security import generate_password_hash
 from app import db
-from app.models import User, Node, NodeMetrics, TaskRequest, MLResult
+from app.models import User, Node, NodeMetrics, TaskRequest, MLResult, TaskExecutionLog
 from app.allocation_engine import stop_task
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
@@ -189,6 +189,13 @@ def delete_node(node_id):
     
     return jsonify({"message": f"Node {node.name} removed successfully"}), 200
 
+def _last_reason(t):
+    # Why a request failed or is waiting, so the admin can see it in History
+    if t.status not in ("failed", "pending", "queued"):
+        return ""
+    last = TaskExecutionLog.query.filter_by(task_id=t.id).order_by(TaskExecutionLog.id.desc()).first()
+    return (t.message if t.message and t.status == "failed" else (last.message if last else t.message or "")) or ""
+
 @admin_bp.route("/admin-sessions", methods=["GET"])
 @jwt_required()
 def admin_sessions():
@@ -209,7 +216,8 @@ def admin_sessions():
             "machine": t.assigned_pc or "—",
             "start_time": t.start_time.isoformat() if t.start_time else "—",
             "duration": t.duration_minutes,
-            "status": t.status
+            "status": t.status,
+            "reason": _last_reason(t)
         } for t in tasks]
     })
 
