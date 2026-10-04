@@ -206,3 +206,28 @@ def stop_task(task_id, reason="Requested"):
     db.session.commit()
     
     return {"status": "stopped", "task_id": task.id}
+
+
+def release_node_tasks(node, reason):
+    """A node left or stopped answering. Session requests it had not started yet go back to
+    the queue so another PC / device can take them; work already running there fails."""
+    requeued, failed = 0, 0
+    tasks = TaskRequest.query.filter(
+        TaskRequest.assigned_node_id == node.id,
+        TaskRequest.status.in_(["allocated", "starting", "running"])
+    ).all()
+    for t in tasks:
+        is_ml = "ml" in (t.task_type or "")
+        if t.status in ("allocated", "starting") and not is_ml:
+            log_event(t.id, node.id, "pending", f"Re-queued: {reason} ({node.name})")
+            t.status = "pending"
+            t.assigned_node_id = None
+            t.assigned_pc = None
+            t.message = f"Re-queued: {reason}"
+            requeued += 1
+        else:
+            t.status = "failed"
+            t.message = f"Failed: {reason} ({node.name})"
+            log_event(t.id, node.id, "failed", t.message)
+            failed += 1
+    return requeued, failed

@@ -3,7 +3,7 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone, timedelta
 from app import db
 from app.models import Node, NodeMetrics, TaskRequest
-from app.allocation_engine import stop_task, log_event 
+from app.allocation_engine import stop_task, log_event, release_node_tasks 
 from sqlalchemy import or_
 
 agent_bp = Blueprint("agent", __name__)
@@ -62,6 +62,19 @@ def agent_heartbeat():
 
     db.session.commit()
     return jsonify({"status": "updated"})
+
+@agent_bp.route("/agent/leave", methods=["POST"])
+def agent_leave():
+    # A node is leaving the pool on purpose (browser page closed, "Leave the pool").
+    # Sent with navigator.sendBeacon as text/plain, hence force=True.
+    data = request.get_json(force=True, silent=True) or {}
+    node = Node.query.filter_by(name=data.get("name")).first()
+    if not node:
+        return jsonify({"status": "unknown node"}), 404
+    node.status = "offline"
+    requeued, failed = release_node_tasks(node, "device left the pool")
+    db.session.commit()
+    return jsonify({"status": "offline", "requeued": requeued, "failed": failed})
 
 # ==========================================
 # POLLING & CALLBACK ROUTES (FOR AGENT)

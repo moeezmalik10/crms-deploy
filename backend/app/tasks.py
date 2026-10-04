@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from app import db, scheduler
 from app.models import TaskRequest, Node
-from app.allocation_engine import allocate_task, stop_task
+from app.allocation_engine import allocate_task, stop_task, release_node_tasks
 
 @scheduler.task('interval', id='process_queue', seconds=15) # Increased to 15s
 def process_queue():
@@ -39,7 +39,11 @@ def cleanup_system():
             TaskRequest.created_at < stale_starting_limit
         ).all()
         for task in stale_starting:
+            if "ml" in (task.task_type or ""):
+                continue
             task.status = "pending"
+            task.assigned_node_id = None   # let the queue place it on any node again
+            task.assigned_pc = None
             task.message = "Re-queued after starting timeout (agent did not acknowledge ready)."
             print(f"Task {task.id} re-queued after starting timeout.")
 
@@ -49,14 +53,8 @@ def cleanup_system():
 
         for node in dead_nodes:
             node.status = "offline"
-            stuck = TaskRequest.query.filter(
-                TaskRequest.assigned_node_id == node.id,
-                TaskRequest.status.in_(["running", "starting"])
-            ).all()
-            for t in stuck:
-                t.status = "failed"
-                t.message = "Failed due to node heartbeat timeout (Ghost Node)"
-            print(f"Node {node.name} marked offline. {len(stuck)} tasks failed due to heartbeat timeout.")
+            requeued, failed = release_node_tasks(node, "node heartbeat timeout")
+            print(f"Node {node.name} marked offline. {requeued} task(s) re-queued, {failed} failed.")
         
         running_tasks = TaskRequest.query.filter_by(status="running").all()
         for t in running_tasks:

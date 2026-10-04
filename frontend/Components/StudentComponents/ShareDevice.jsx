@@ -79,7 +79,9 @@ export default function ShareDevice() {
       if (!document.hidden && timers.current.length) keepAwake();
     };
     document.addEventListener("visibilitychange", vis);
-    return () => { clearInterval(t); clearInterval(tick); document.removeEventListener("visibilitychange", vis); leave(true); };
+    const bye = () => leave(true);
+    window.addEventListener("pagehide", bye);
+    return () => { clearInterval(t); clearInterval(tick); document.removeEventListener("visibilitychange", vis); window.removeEventListener("pagehide", bye); leave(true); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -161,7 +163,24 @@ export default function ShareDevice() {
     }
   }
 
+  // Tell the backend straight away that this device is gone, so requests it had not
+  // started go back to the queue instead of failing a minute later.
+  function announceLeave() {
+    if (!timers.current.length) return;
+    const s = sessionRef.current;
+    if (s) {
+      try { fetch(`${API_BASE}/agent/tasks/${s.id}/stop`, { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task_id: s.id }) }); } catch { /* ignore */ }
+    }
+    const body = JSON.stringify({ name: nodeName.current });
+    try {
+      if (!(navigator.sendBeacon && navigator.sendBeacon(`${API_BASE}/agent/leave`, new Blob([body], { type: "text/plain" })))) {
+        fetch(`${API_BASE}/agent/leave`, { method: "POST", keepalive: true, headers: { "Content-Type": "text/plain" }, body });
+      }
+    } catch { /* ignore */ }
+  }
+
   function leave(silent) {
+    announceLeave();
     timers.current.forEach((t) => t.clear());
     timers.current = [];
     try { wakeLock.current && wakeLock.current.release(); } catch { /* ignore */ }
@@ -237,6 +256,9 @@ export default function ShareDevice() {
 
           {joined && hidden && (
             <p className="text-sm text-red-700 font-semibold">This page is in the background. Bring it back to the front, or the device drops out of the pool.</p>
+          )}
+          {joined && (
+            <p className="text-xs text-[#777]">Stay on this page: opening another menu item, logging out or closing the tab takes this device out of the pool.</p>
           )}
         </div>
 
