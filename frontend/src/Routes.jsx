@@ -15,6 +15,7 @@ import StudentSessions from "../Components/StudentComponents/StudentSessions"
 import NewRequests from "../Components/StudentComponents/NewRequest"
 import MLTask from "../Components/StudentComponents/MLTask"
 import MLResults from "../Components/StudentComponents/MLResults"
+import ShareDevice from "../Components/StudentComponents/ShareDevice"
 
 import AdminSecurityDashboard from "../Components/IDS/AdminSecurityDashboard"
 import BlacklistDashboard from "../Components/IDS/BlacklistDashboard"
@@ -26,6 +27,8 @@ const Routes = createBrowserRouter([
     path:"/",
     Component:LoginPage,
 },
+  // Any phone / tablet can join the pool from here without logging in
+  { path:"/node", Component: ShareDevice },
   { path:"/studentpage",
    Component: StudentPageLayout,
  children:[
@@ -36,6 +39,7 @@ const Routes = createBrowserRouter([
         {path:"studentsessions" , Component: StudentSessions, },
         {path:"mltaskrequest" , Component: MLTask, },
    { path:"mltaskresults", Component: MLResults },
+        {path:"sharedevice" , Component: ShareDevice, },
                 { path:"mltaskresults/:jobId" , Component: MLResults }
 
     ]
