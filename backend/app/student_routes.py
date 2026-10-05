@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from app import db
 from app.models import User, TaskRequest, MLResult
 from app.allocation_engine import allocate_task, stop_task, log_event
-from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
 
 student_bp = Blueprint("student", __name__)
 
@@ -96,6 +96,14 @@ def get_my_sessions(username):
         db.session.commit()
 
     tasks = TaskRequest.query.filter_by(user_id=user.id).order_by(TaskRequest.created_at.desc()).all()
+
+    # Remote-access passwords are only shown to the logged-in owner of the session
+    owner = False
+    try:
+        verify_jwt_in_request(optional=True)
+        owner = str(get_jwt_identity() or "") == str(user.id)
+    except Exception:
+        owner = False
     
     return jsonify([{
         "id": t.id,
@@ -108,7 +116,7 @@ def get_my_sessions(username):
         "start_time": t.start_time.isoformat() if t.start_time else None,
         "expiry_time": t.expiry_time.isoformat() if t.expiry_time else None,
         "vm_username": t.vm_username,
-        "vm_password": t.vm_password
+        "vm_password": t.vm_password if owner else None
     } for t in tasks])
     
 @student_bp.route("/tasks/<int:task_id>", methods=["DELETE"])
@@ -118,7 +126,9 @@ def student_delete_task(task_id):
     task = TaskRequest.query.get_or_404(task_id)
     
     # Ownership Check
-    current_user = User.query.filter_by(username=get_jwt_identity()).first()
+    # The login token stores the user id (see auth_routes.create_access_token)
+    ident = str(get_jwt_identity())
+    current_user = User.query.get(int(ident)) if ident.isdigit() else User.query.filter_by(username=ident).first()
     if not current_user or task.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
     

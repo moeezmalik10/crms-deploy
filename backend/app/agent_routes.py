@@ -150,6 +150,14 @@ def task_ready(task_id):
     db.session.commit()
     return jsonify({"status": "success"}), 200
 
+@agent_bp.route("/agent/tasks/<int:task_id>/status", methods=["GET"])
+def agent_task_status(task_id):
+    # Lets an agent close remote access as soon as a session is stopped or deleted on the website
+    task = TaskRequest.query.get(task_id)
+    if not task:
+        return jsonify({"status": "deleted"}), 404
+    return jsonify({"status": task.status}), 200
+
 @agent_bp.route("/agent/tasks/<int:task_id>/stop", methods=["POST"])
 def agent_stop_task(task_id):
     result = stop_task(task_id, reason="Agent Process Finished") 

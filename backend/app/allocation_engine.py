@@ -103,6 +103,7 @@ def allocate_task(task_id):
         # SCORING ENGINE
         best_node = None
         highest_score = float('-inf')
+        skipped = []   # why each node was not chosen, shown to the admin
 
         for node in nodes:
             latest_metric = metric_map.get(node.id)
@@ -110,13 +111,17 @@ def allocate_task(task_id):
             if latest_metric:        
                 # If the PC physically reports less than 2GB free right now, skip it, even if database says it's empty.
                 if latest_metric.memory_free_mb < 2048:
+                    skipped.append(f"{node.name}: only {latest_metric.memory_free_mb:.0f} MB RAM free")
                     continue
             stats = usage_map[node.id]
             task_count = stats["phys"] + stats["rem"]
             
-            # Rule A: Mode Multi-tenancy Guard
-            if task.mode == "physical" and stats["phys"] >= 1: continue
-            if task.mode == "remote" and stats["rem"] >= 2: continue
+            # Rule A: one session per PC. Remote access (RustDesk) controls the PC's real desktop,
+            # so a PC is either reserved in person or used remotely, by one student at a time.
+            if task_count >= 1:
+                busy = [f"{t.id} ({t.mode})" for t in active_tasks if t.assigned_node_id == node.id]
+                skipped.append(f"{node.name}: in use by task {', '.join(busy)}")
+                continue
 
             # Rule B: Safety Buffer (20% of total)
             total_ram = node.total_ram_mb or 0
@@ -134,6 +139,8 @@ def allocate_task(task_id):
 
             #validation
         
+            if not (avail_cpu >= profile["cpu"] and avail_ram >= profile["ram"]):
+                skipped.append(f"{node.name}: capacity left {avail_cpu:.1f} cores / {avail_ram:.0f} MB, needs {profile['cpu']} / {profile['ram']} MB")
             if avail_cpu >= profile["cpu"] and avail_ram >= profile["ram"]:
                 # Resource utilization
                 remaining_ram = avail_ram - profile["ram"]
@@ -164,6 +171,7 @@ def allocate_task(task_id):
                 live_safe_ram = profile["ram"] + 768
                 if latest_metric:
                     if latest_metric.memory_free_mb < live_safe_ram:
+                        skipped.append(f"{node.name}: {latest_metric.memory_free_mb:.0f} MB free, needs {live_safe_ram} MB")
                         continue
                 
                 if score > highest_score:
@@ -173,7 +181,8 @@ def allocate_task(task_id):
         # EXECUTE ALLOCATION
         if not best_node:
             task.status = "pending"
-            log_event(task.id, None, "pending", "Insufficient resources on available nodes.")
+            detail = "; ".join(skipped) or "no node qualified"
+            log_event(task.id, None, "pending", f"Insufficient resources - {detail}")
             db.session.commit()
             return {"status": "pending"}
 

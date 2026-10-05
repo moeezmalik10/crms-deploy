@@ -54,6 +54,129 @@ HEARTBEAT_INTERVAL = 30  # seconds
 HOST_USERNAME = "lab_user"
 HOST_PASSWORD = "lab_123"
 
+# ---------- REMOTE MODE THROUGH RUSTDESK ----------
+# If RustDesk is installed on this PC, a Remote request gives the student remote control of
+# this PC: the agent sets a fresh one-time RustDesk password, sends the RustDesk ID and that
+# password to the student's Remote Link page, and changes the password again when the
+# session ends (time up, or deleted early). Without RustDesk the original Hyper-V VM flow is used.
+import secrets
+import string
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_RD_PATH_FILE = os.path.join(_HERE, "rustdesk_path.txt")
+_RD_CANDIDATES = [
+    open(_RD_PATH_FILE, encoding="utf-8").read().strip() if os.path.exists(_RD_PATH_FILE) else "",
+    r"C:\Program Files\RustDesk\rustdesk.exe",
+    r"C:\Program Files (x86)\RustDesk\rustdesk.exe",
+]
+RUSTDESK_EXE = next((p for p in _RD_CANDIDATES if p and os.path.exists(p)), None)
+REMOTE_METHOD = "rustdesk" if RUSTDESK_EXE else "vm"
+
+_rd_sessions = {}            # task_id -> {"ends": epoch seconds, "timer": Timer}
+_rd_lock = threading.Lock()
+
+
+def is_admin():
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _new_password(n=10):
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def rustdesk_get_id():
+    try:
+        out = subprocess.run([RUSTDESK_EXE, "--get-id"], capture_output=True, text=True, timeout=30).stdout
+        digits = "".join(ch for ch in out if ch.isdigit())
+        return digits or None
+    except Exception as e:
+        print(f"[rustdesk] could not read ID: {e}")
+        return None
+
+
+def rustdesk_set_password(pw):
+    try:
+        r = subprocess.run([RUSTDESK_EXE, "--password", pw], capture_output=True, text=True, timeout=30)
+        return r.returncode == 0
+    except Exception as e:
+        print(f"[rustdesk] could not set password: {e}")
+        return False
+
+
+def rustdesk_lock():
+    """Replace the password with a random one nobody knows."""
+    if RUSTDESK_EXE:
+        rustdesk_set_password(_new_password(16))
+
+
+def start_rustdesk_session(task_id, duration):
+    ready_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/ready"
+    error_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/error"
+    if not is_admin():
+        reason = "agent is not running as administrator, so it cannot set the RustDesk password"
+        print(f"[rustdesk] {reason}")
+        requests.post(error_url, json={"reason": reason}, timeout=15)
+        return
+    rd_id = rustdesk_get_id()
+    pw = _new_password()
+    if not rd_id or not rustdesk_set_password(pw):
+        reason = "RustDesk did not answer (is it installed and running on this PC?)"
+        print(f"[rustdesk] {reason}")
+        requests.post(error_url, json={"reason": reason}, timeout=15)
+        return
+    payload = {
+        "mode": "remote",
+        "hostname": socket.gethostname(),
+        "ip": get_ip(),
+        "username": rd_id,             # shown as "RustDesk ID"
+        "password": pw,                # one-time password for this session only
+        "port": 0,
+        "link": f"rustdesk:{rd_id}",
+    }
+    requests.post(ready_url, json=payload, timeout=15)
+    timer = threading.Timer(duration * 60, end_rustdesk_session, args=(task_id, True, "time is up"))
+    timer.daemon = True
+    with _rd_lock:
+        _rd_sessions[task_id] = {"ends": time.time() + duration * 60, "timer": timer}
+    timer.start()
+    print(f"[rustdesk] Task {task_id}: remote access open for {duration} min (RustDesk ID {rd_id})")
+
+
+def end_rustdesk_session(task_id, notify_backend, reason):
+    with _rd_lock:
+        s = _rd_sessions.pop(task_id, None)
+    if not s:
+        return
+    try:
+        s["timer"].cancel()
+    except Exception:
+        pass
+    rustdesk_lock()
+    print(f"[rustdesk] Task {task_id}: remote access closed ({reason}); password changed")
+    if notify_backend:
+        notify_backend_stop(task_id)
+
+
+def rustdesk_watch_loop():
+    """Close remote access at once if the session was ended on the website (deleted / stopped)."""
+    while True:
+        time.sleep(15)
+        with _rd_lock:
+            ids = list(_rd_sessions.keys())
+        for task_id in ids:
+            try:
+                r = requests.get(f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/status", timeout=20)
+                status = r.json().get("status") if r.status_code == 200 else ("deleted" if r.status_code == 404 else None)
+                if status and status not in ("running", "starting", "allocated"):
+                    end_rustdesk_session(task_id, False, f"session {status} on the website")
+            except Exception as e:
+                print(f"[rustdesk] status check failed: {e}")
+
 # ---------- VM CONFIG ----------
 # Defines all VMs this machine manages.
 # Each VM has its own HTTP port so both can run simultaneously.
@@ -545,6 +668,10 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
     # REMOTE MODE
     # Agent picks VM based on task_name from TASK_VM_MAP.
     # ======================================================
+    if mode == "remote" and REMOTE_METHOD == "rustdesk":
+        start_rustdesk_session(task_id, duration)
+        return
+
     if mode == "remote":
 
         # Resolve which VM to use based on task_name
@@ -701,6 +828,17 @@ if __name__ == "__main__":
     print(f"Task Map     : {TASK_VM_MAP}")
     print(f"Heartbeat    : every {HEARTBEAT_INTERVAL} seconds")
     print(f"Node name    : {socket.gethostname()}")
+    if REMOTE_METHOD == "rustdesk":
+        rd_id = rustdesk_get_id()
+        print(f"Remote mode  : RustDesk ({RUSTDESK_EXE}), ID {rd_id or 'unknown'}")
+        if not is_admin():
+            print("WARNING      : not running as administrator - Remote requests will fail.")
+            print("               Close this window and start start_agent.bat again (it asks for admin).")
+        else:
+            rustdesk_lock()
+            print("               RustDesk password reset; it is only shared during a session.")
+    else:
+        print("Remote mode  : Hyper-V VMs (RustDesk not found - install it for simple remote access)")
     print("=" * 40)
 
     for attempt in range(1, 4):
@@ -711,6 +849,8 @@ if __name__ == "__main__":
 
     threading.Thread(target=heartbeat_loop,       daemon=True).start()
     threading.Thread(target=command_polling_loop, daemon=True).start()
+    if REMOTE_METHOD == "rustdesk":
+        threading.Thread(target=rustdesk_watch_loop, daemon=True).start()
 
     print("Heartbeat loop started")
     print("Command polling loop started")
