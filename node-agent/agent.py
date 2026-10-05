@@ -70,7 +70,10 @@ _RD_CANDIDATES = [
     r"C:\Program Files (x86)\RustDesk\rustdesk.exe",
 ]
 RUSTDESK_EXE = next((p for p in _RD_CANDIDATES if p and os.path.exists(p)), None)
-REMOTE_METHOD = "rustdesk" if RUSTDESK_EXE else "vm"
+# The previous group's Hyper-V VM flow is only used if you create an empty file
+# "use_hyperv_vms.txt" next to agent.py (it needs Hyper-V, a prepared VM and admin rights).
+USE_HYPERV_VMS = os.path.exists(os.path.join(_HERE, "use_hyperv_vms.txt"))
+REMOTE_METHOD = "rustdesk" if RUSTDESK_EXE else ("vm" if USE_HYPERV_VMS else "none")
 
 _rd_sessions = {}            # task_id -> {"ends": epoch seconds, "timer": Timer}
 _rd_lock = threading.Lock()
@@ -672,6 +675,16 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
         start_rustdesk_session(task_id, duration)
         return
 
+    if mode == "remote" and REMOTE_METHOD == "none":
+        reason = (f"remote access is not set up on {socket.gethostname()}: install RustDesk "
+                  "(C:\\Program Files\\RustDesk\\rustdesk.exe) and restart the agent")
+        print(f"[agent.py] Task {task_id} declined: {reason}")
+        try:
+            requests.post(f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/error", json={"reason": reason}, timeout=15)
+        except Exception as e:
+            print(f"[agent.py] could not report the error: {e}")
+        return
+
     if mode == "remote":
 
         # Resolve which VM to use based on task_name
@@ -837,8 +850,11 @@ if __name__ == "__main__":
         else:
             rustdesk_lock()
             print("               RustDesk password reset; it is only shared during a session.")
+    elif REMOTE_METHOD == "vm":
+        print("Remote mode  : Hyper-V VMs (use_hyperv_vms.txt found)")
     else:
-        print("Remote mode  : Hyper-V VMs (RustDesk not found - install it for simple remote access)")
+        print("Remote mode  : NOT AVAILABLE - RustDesk not found at C:\\Program Files\\RustDesk\\rustdesk.exe")
+        print("               Install RustDesk (or put its full path in rustdesk_path.txt) and restart.")
     print("=" * 40)
 
     for attempt in range(1, 4):
