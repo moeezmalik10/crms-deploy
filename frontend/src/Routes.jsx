@@ -16,6 +16,10 @@ import NewRequests from "../Components/StudentComponents/NewRequest"
 import MLTask from "../Components/StudentComponents/MLTask"
 import MLResults from "../Components/StudentComponents/MLResults"
 import ShareDevice from "../Components/StudentComponents/ShareDevice"
+import PoolDashboard from "../Components/Pool/PoolDashboard"
+import Contribute from "../Components/Pool/Contribute"
+import Jobs from "../Components/Pool/Jobs"
+import Storage from "../Components/Pool/Storage"
 
 import AdminSecurityDashboard from "../Components/IDS/AdminSecurityDashboard"
 import BlacklistDashboard from "../Components/IDS/BlacklistDashboard"
@@ -40,6 +44,10 @@ const Routes = createBrowserRouter([
         {path:"mltaskrequest" , Component: MLTask, },
    { path:"mltaskresults", Component: MLResults },
         {path:"sharedevice" , Component: ShareDevice, },
+        {path:"pool" , Component: PoolDashboard, },
+        {path:"contribute" , Component: Contribute, },
+        {path:"jobs" , Component: Jobs, },
+        {path:"storage" , Component: Storage, },
                 { path:"mltaskresults/:jobId" , Component: MLResults }
 
     ]
@@ -51,6 +59,7 @@ const Routes = createBrowserRouter([
     children:[
              {index: true , Component: Machine, },
              {path:"machines" , Component: Machine, },
+             {path:"pool" , Component: () => <PoolDashboard admin />, },
              {path:"history" , Component: History, },
         {path:"manageusers" , Component: ManageUsers, },
         {path:"adminprofile" , Component: AdminProfile, },

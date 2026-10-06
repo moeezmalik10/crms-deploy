@@ -114,6 +114,26 @@ function Check-Cors {
     } catch { Fail "CORS check failed: $($_.Exception.Message)" }
 }
 
+function Check-Pool {
+    Write-Step "Resource pool - devices, totals and IP addresses"
+    if (-not (Need "BackendUrl")) { return }
+    try {
+        $t = Get-AdminToken
+        $h = @{ Authorization = "Bearer $($t.access_token)" }
+        $o = Invoke-RestMethod -Uri ((U "BackendUrl") + "/pool/overview") -Headers $h -TimeoutSec 100
+        Write-Ok ("pool: {0} online, {1} paused, {2} offline" -f $o.online, $o.paused, $o.offline)
+        Write-Host ("    cores {0} ({1} GHz)   RAM {2:N0} MB   disk {3:N0} GB   shared storage {4} GB   files {5}" -f `
+            $o.cores_online, $o.ghz_total, $o.ram_total_mb, $o.storage_total_gb, $o.shared_storage_gb, $o.pool_files)
+        $d = Invoke-RestMethod -Uri ((U "BackendUrl") + "/pool/devices") -Headers $h -TimeoutSec 100
+        foreach ($n in $d) {
+            if ($n.state -eq "offline") { continue }
+            $line = "{0,-20} {1,-7} LAN {2,-15} public {3,-15} sandbox {4}" -f $n.name, $n.state, $n.lan_ip, $n.public_ip, $n.sandbox_mode
+            if ($n.verified) { Write-Ok $line } else { Write-Warn "$line (no device key)" }
+        }
+        if (-not ($d | Where-Object { $_.verified })) { Write-Warn "no contributed device yet - Contribute Resources -> Create join code, then start_agent.bat" }
+    } catch { Fail "pool API not reachable: $($_.Exception.Message) -> push the latest backend" }
+}
+
 function Check-Nodes {
     Write-Step "Steps 6-7 - PCs in the pool"
     if (-not (Need "BackendUrl")) { return }
@@ -140,8 +160,9 @@ switch ($Step.ToLower()) {
     "website" { Check-Website }
     "cors"    { Check-Cors }
     "nodes"   { Check-Nodes }
-    "all"     { Check-Files; Check-Github; Check-Backend; Check-Ids; Check-Website; Check-Cors; Check-Nodes }
-    default   { Write-Host "Use one of: files, github, backend, ids, website, cors, nodes, all" }
+    "pool"    { Check-Pool }
+    "all"     { Check-Files; Check-Github; Check-Backend; Check-Ids; Check-Website; Check-Cors; Check-Nodes; Check-Pool }
+    default   { Write-Host "Use one of: files, github, backend, ids, website, cors, nodes, pool, all" }
 }
 Write-Host ""
 if ($script:fails -eq 0) { Write-Host "PASSED" -ForegroundColor Green } else { Write-Host "$($script:fails) problem(s) - fix the FAIL lines above, then run the check again" -ForegroundColor Red }

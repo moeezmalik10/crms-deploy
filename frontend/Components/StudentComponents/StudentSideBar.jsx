@@ -89,6 +89,43 @@ export default function StudentSideBar() {
                 </NavLink>
 
 
+                {/* ================================resource pool======== */}
+                <NavLink
+                 onClick={() => setIsOpen(false)}
+                  to={"pool"}
+                  className={({ isActive }) => ` p-3 rounded-lg tracking-wider text-start w-full transition-all duration-300
+                ${isActive ? " bg-[#b3b3b3ee] text-black font-bold" : "text-white bg-[#212121]"}
+                `}
+                >
+                  Resource Pool
+                </NavLink>
+                <NavLink
+                 onClick={() => setIsOpen(false)}
+                  to={"contribute"}
+                  className={({ isActive }) => ` p-3 rounded-lg tracking-wider text-start w-full transition-all duration-300
+                ${isActive ? " bg-[#b3b3b3ee] text-black font-bold" : "text-white bg-[#212121]"}
+                `}
+                >
+                  Contribute Resources
+                </NavLink>
+                <NavLink
+                 onClick={() => setIsOpen(false)}
+                  to={"jobs"}
+                  className={({ isActive }) => ` p-3 rounded-lg tracking-wider text-start w-full transition-all duration-300
+                ${isActive ? " bg-[#b3b3b3ee] text-black font-bold" : "text-white bg-[#212121]"}
+                `}
+                >
+                  Run a Job
+                </NavLink>
+                <NavLink
+                 onClick={() => setIsOpen(false)}
+                  to={"storage"}
+                  className={({ isActive }) => ` p-3 rounded-lg tracking-wider text-start w-full transition-all duration-300
+                ${isActive ? " bg-[#b3b3b3ee] text-black font-bold" : "text-white bg-[#212121]"}
+                `}
+                >
+                  Pool Storage
+                </NavLink>
                 {/* ================================Remote Link======== */}
                 <NavLink
                  onClick={() => setIsOpen(false)}
@@ -99,7 +136,7 @@ export default function StudentSideBar() {
                 ${isActive ? " bg-[#b3b3b3ee] text-black font-bold" : "text-white bg-[#212121]"}
                 `}
                 >
-                  Remote Link
+                  My Workspace
                 </NavLink>
                 {/* ================================Share this device======== */}
                 <NavLink

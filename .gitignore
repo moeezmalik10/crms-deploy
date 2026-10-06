@@ -9,3 +9,10 @@ dist/
 outputs/
 storage/
 tools/deploy_config.ps1.bak
+node-agent/pool_storage/
+node-agent/pool_work/
+node-agent/pool_workspaces/
+node-agent/device_key.txt
+node-agent/node_name.txt
+node-agent/join_code.txt
+node-agent/cloudflared*

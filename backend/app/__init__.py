@@ -13,6 +13,11 @@ scheduler = APScheduler()
 
 def create_app():
     app = Flask(__name__)
+    # Render (and most hosts) put a proxy in front of the app. ProxyFix makes request.remote_addr
+    # the real client IP (shown as the device's public IP) and request.host_url use https.
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024   # uploads to the pool (jobs, storage)
     
     # Load configuration from Config class
     app.config.from_object(Config)
@@ -49,6 +54,8 @@ def create_app():
     from app.student_routes import student_bp
     from app.agent_routes import agent_bp
     from app.ml_routes import ml_bp
+    from app.pool_routes import pool_bp
+    from app.pool_agent_routes import pool_agent_bp
 
     # REGISTER
     app.register_blueprint(auth_bp)
@@ -56,10 +63,14 @@ def create_app():
     app.register_blueprint(student_bp)
     app.register_blueprint(agent_bp)
     app.register_blueprint(ml_bp)
+    app.register_blueprint(pool_bp)
+    app.register_blueprint(pool_agent_bp)
     
     #Create DB tables before first request
     with app.app_context():
         from app import tasks
         db.create_all()
+        from app.migrations import run_startup_migrations
+        run_startup_migrations(db)
         
     return app

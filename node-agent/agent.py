@@ -54,131 +54,21 @@ HEARTBEAT_INTERVAL = 30  # seconds
 HOST_USERNAME = "lab_user"
 HOST_PASSWORD = "lab_123"
 
-# ---------- REMOTE MODE THROUGH RUSTDESK ----------
-# If RustDesk is installed on this PC, a Remote request gives the student remote control of
-# this PC: the agent sets a fresh one-time RustDesk password, sends the RustDesk ID and that
-# password to the student's Remote Link page, and changes the password again when the
-# session ends (time up, or deleted early). Without RustDesk the original Hyper-V VM flow is used.
-import secrets
-import string
-
+# ---------- RESOURCE POOL ----------
+# Joining the pool, device key, sandboxed jobs/workspaces and pooled storage live in
+# pool_runtime.py. Requesters get a slice of this PC's resources, never its desktop.
+import pool_runtime as pool
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_RD_PATH_FILE = os.path.join(_HERE, "rustdesk_path.txt")
-_RD_CANDIDATES = [
-    open(_RD_PATH_FILE, encoding="utf-8").read().strip() if os.path.exists(_RD_PATH_FILE) else "",
-    r"C:\Program Files\RustDesk\rustdesk.exe",
-    r"C:\Program Files (x86)\RustDesk\rustdesk.exe",
-]
-RUSTDESK_EXE = next((p for p in _RD_CANDIDATES if p and os.path.exists(p)), None)
+BACKEND_BASE_URL, NODE_NAME = pool.setup()
+BACKEND_BASE_URL = BACKEND_BASE_URL or "http://localhost:8000"
+pool.BACKEND = BACKEND_BASE_URL
+REGISTER_URL = f"{BACKEND_BASE_URL}/register_node"
+HEARTBEAT_URL = f"{BACKEND_BASE_URL}/agent/heartbeat"
+API = pool.API          # requests session that carries this device's key
 # The previous group's Hyper-V VM flow is only used if you create an empty file
 # "use_hyperv_vms.txt" next to agent.py (it needs Hyper-V, a prepared VM and admin rights).
 USE_HYPERV_VMS = os.path.exists(os.path.join(_HERE, "use_hyperv_vms.txt"))
-REMOTE_METHOD = "rustdesk" if RUSTDESK_EXE else ("vm" if USE_HYPERV_VMS else "none")
 
-_rd_sessions = {}            # task_id -> {"ends": epoch seconds, "timer": Timer}
-_rd_lock = threading.Lock()
-
-
-def is_admin():
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
-
-
-def _new_password(n=10):
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(n))
-
-
-def rustdesk_get_id():
-    try:
-        out = subprocess.run([RUSTDESK_EXE, "--get-id"], capture_output=True, text=True, timeout=30).stdout
-        digits = "".join(ch for ch in out if ch.isdigit())
-        return digits or None
-    except Exception as e:
-        print(f"[rustdesk] could not read ID: {e}")
-        return None
-
-
-def rustdesk_set_password(pw):
-    try:
-        r = subprocess.run([RUSTDESK_EXE, "--password", pw], capture_output=True, text=True, timeout=30)
-        return r.returncode == 0
-    except Exception as e:
-        print(f"[rustdesk] could not set password: {e}")
-        return False
-
-
-def rustdesk_lock():
-    """Replace the password with a random one nobody knows."""
-    if RUSTDESK_EXE:
-        rustdesk_set_password(_new_password(16))
-
-
-def start_rustdesk_session(task_id, duration):
-    ready_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/ready"
-    error_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/error"
-    if not is_admin():
-        reason = "agent is not running as administrator, so it cannot set the RustDesk password"
-        print(f"[rustdesk] {reason}")
-        requests.post(error_url, json={"reason": reason}, timeout=15)
-        return
-    rd_id = rustdesk_get_id()
-    pw = _new_password()
-    if not rd_id or not rustdesk_set_password(pw):
-        reason = "RustDesk did not answer (is it installed and running on this PC?)"
-        print(f"[rustdesk] {reason}")
-        requests.post(error_url, json={"reason": reason}, timeout=15)
-        return
-    payload = {
-        "mode": "remote",
-        "hostname": socket.gethostname(),
-        "ip": get_ip(),
-        "username": rd_id,             # shown as "RustDesk ID"
-        "password": pw,                # one-time password for this session only
-        "port": 0,
-        "link": f"rustdesk:{rd_id}",
-    }
-    requests.post(ready_url, json=payload, timeout=15)
-    timer = threading.Timer(duration * 60, end_rustdesk_session, args=(task_id, True, "time is up"))
-    timer.daemon = True
-    with _rd_lock:
-        _rd_sessions[task_id] = {"ends": time.time() + duration * 60, "timer": timer}
-    timer.start()
-    print(f"[rustdesk] Task {task_id}: remote access open for {duration} min (RustDesk ID {rd_id})")
-
-
-def end_rustdesk_session(task_id, notify_backend, reason):
-    with _rd_lock:
-        s = _rd_sessions.pop(task_id, None)
-    if not s:
-        return
-    try:
-        s["timer"].cancel()
-    except Exception:
-        pass
-    rustdesk_lock()
-    print(f"[rustdesk] Task {task_id}: remote access closed ({reason}); password changed")
-    if notify_backend:
-        notify_backend_stop(task_id)
-
-
-def rustdesk_watch_loop():
-    """Close remote access at once if the session was ended on the website (deleted / stopped)."""
-    while True:
-        time.sleep(15)
-        with _rd_lock:
-            ids = list(_rd_sessions.keys())
-        for task_id in ids:
-            try:
-                r = requests.get(f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/status", timeout=20)
-                status = r.json().get("status") if r.status_code == 200 else ("deleted" if r.status_code == 404 else None)
-                if status and status not in ("running", "starting", "allocated"):
-                    end_rustdesk_session(task_id, False, f"session {status} on the website")
-            except Exception as e:
-                print(f"[rustdesk] status check failed: {e}")
 
 # ---------- VM CONFIG ----------
 # Defines all VMs this machine manages.
@@ -251,9 +141,9 @@ def get_ip():
 def get_host_metrics():
     cpu_used = psutil.cpu_percent(interval=1)
     memory   = psutil.virtual_memory()
-    disk     = psutil.disk_usage("C:\\")
+    disk     = pool.disk_usage()
     return {
-        "hostname": socket.gethostname(),
+        "hostname": NODE_NAME,
         "ip":       get_ip(),
         "cpu":      {"used_percent": cpu_used},
         "memory":   {
@@ -273,6 +163,7 @@ def build_payload():
     return {
         "timestamp": str(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
         "host":      get_host_metrics(),
+        "hardware":  pool.hardware_info(),
     }
 
 
@@ -282,17 +173,22 @@ def build_payload():
 def register_node():
     try:
         payload = {
-            "name":         socket.gethostname(),
+            "name":         NODE_NAME,
             "total_cores":  psutil.cpu_count(),
             "total_ram_mb": psutil.virtual_memory().total / (1024 * 1024),
+            "hardware":     pool.hardware_info(),
         }
         # Render's free backend sleeps; the first request can take about a minute to wake it.
-        r = requests.post(REGISTER_URL, json=payload, timeout=90)
+        r = API.post(REGISTER_URL, json=payload, timeout=90)
         if r.status_code == 200 and "registered" in r.text:
+            pool.apply_settings(r.json().get("settings"))
             print(f"[SUCCESS] Node {payload['name']} registered with {BACKEND_BASE_URL}")
             return True
-        print(f"[FAILED] Register failed: HTTP {r.status_code} from {REGISTER_URL}")
-        print("         Is backend_url.txt exactly your crms-backend address from Render?")
+        print(f"[FAILED] Register failed: HTTP {r.status_code} from {REGISTER_URL}: {r.text[:200]}")
+        if r.status_code == 401:
+            print("         This PC needs a device key: delete device_key.txt and join again from the website.")
+        else:
+            print("         Is backend_url.txt exactly your crms-backend address from Render?")
     except Exception as e:
         print(f"[FAILED] Register failed: {e}")
     return False
@@ -304,9 +200,11 @@ def register_node():
 def heartbeat_loop():
     while True:
         try:
-            r = requests.post(HEARTBEAT_URL, json=build_payload(), timeout=60)
+            r = API.post(HEARTBEAT_URL, json=build_payload(), timeout=60)
             if r.status_code == 200:
-                print(f"Heartbeat sent ({datetime.now().strftime('%H:%M:%S')})")
+                pool.apply_settings(r.json().get("settings"))
+                state = "PAUSED by owner" if pool.SETTINGS.get("paused") else f"sandbox: {pool.SANDBOX}"
+                print(f"Heartbeat sent ({datetime.now().strftime('%H:%M:%S')}) - {state}")
             elif r.status_code == 404 and "not registered" in r.text:
                 print("Heartbeat refused: node not registered - registering again")
                 register_node()
@@ -325,7 +223,7 @@ def heartbeat_loop():
 def agent_health():
     return jsonify({
         "status":   "running",
-        "hostname": socket.gethostname(),
+        "hostname": NODE_NAME,
         "ip":       get_ip(),
     })
 
@@ -348,7 +246,7 @@ def status():
 
     return jsonify({
         "agent":       "running",
-        "hostname":    socket.gethostname(),
+        "hostname":    NODE_NAME,
         "host_ip":     host_ip,
         "sessions":    sessions if sessions else "no active sessions",
         "managed_vms": list(VM_CONFIGS.keys()),
@@ -478,7 +376,7 @@ def notify_backend_stop(task_id):
     """Notifies backend that task is complete so it frees the node."""
     try:
         stop_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/stop"
-        requests.post(stop_url, json={"task_id": task_id}, timeout=10)
+        API.post(stop_url, json={"task_id": task_id}, timeout=10)
         print(f"[agent.py] Backend notified: task {task_id} stopped.")
     except Exception as e:
         print(f"[agent.py] WARNING: Could not notify backend: {e}")
@@ -589,7 +487,7 @@ def run_ml_task_subprocess(task_id, chunk_id, model_type, validation_type, datas
         result_payload = {
             "task_id":      str(task_id),
             "chunk_id":     chunk_id,
-            "node_id":      socket.gethostname(),
+            "node_id":      NODE_NAME,
             "model_type":   model_type,
             "status":       ml_result.get("status", "completed"),
             "metrics":      ml_result.get("metrics", {}),
@@ -612,7 +510,7 @@ def run_ml_task_subprocess(task_id, chunk_id, model_type, validation_type, datas
         # SEND TO BACKEND
         # =========================
         result_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/result"
-        res = requests.post(result_url, json=result_payload, timeout=30)
+        res = API.post(result_url, json=result_payload, timeout=30)
         print(f"[agent.py] Result sent to backend → HTTP {res.status_code}")
     except Exception as e:
         import traceback
@@ -625,7 +523,7 @@ def run_ml_task_subprocess(task_id, chunk_id, model_type, validation_type, datas
 # =====================
 # MAIN TASK HANDLER
 # =====================
-def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, dataset_url=None, model_type="decision_tree", validation_type="none", start_row=0, end_row=100, fed_round=1, global_weights=None, global_intercept=None):
+def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, dataset_url=None, model_type="decision_tree", validation_type="none", start_row=0, end_row=100, fed_round=1, global_weights=None, global_intercept=None, cores=1, ram_mb=2048, disk_mb=3072):
 
     ready_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/ready"
 
@@ -645,7 +543,7 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
             return
 
         try:
-            requests.post(ready_url, json={"status": "ml_started"}, timeout=10)
+            API.post(ready_url, json={"status": "ml_started"}, timeout=10)
             print("[agent.py] Backend notified: ML task started")
         except Exception as e:
             print(f"[agent.py] Failed to notify backend: {e}")
@@ -671,18 +569,9 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
     # REMOTE MODE
     # Agent picks VM based on task_name from TASK_VM_MAP.
     # ======================================================
-    if mode == "remote" and REMOTE_METHOD == "rustdesk":
-        start_rustdesk_session(task_id, duration)
-        return
-
-    if mode == "remote" and REMOTE_METHOD == "none":
-        reason = (f"remote access is not set up on {socket.gethostname()}: install RustDesk "
-                  "(C:\\Program Files\\RustDesk\\rustdesk.exe) and restart the agent")
-        print(f"[agent.py] Task {task_id} declined: {reason}")
-        try:
-            requests.post(f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/error", json={"reason": reason}, timeout=15)
-        except Exception as e:
-            print(f"[agent.py] could not report the error: {e}")
+    # Remote = a sandboxed workspace that uses a slice of this PC (not its desktop)
+    if mode == "remote" and not USE_HYPERV_VMS:
+        pool.start_workspace(task_id, duration or 60, float(cores or 1), float(ram_mb or 2048), float(disk_mb or 3072))
         return
 
     if mode == "remote":
@@ -732,7 +621,7 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
             "port":      cfg["rdp_port"],
             "link":      browser_url,
         }
-        requests.post(ready_url, json=payload, timeout=10)
+        API.post(ready_url, json=payload, timeout=10)
         print(f"[agent.py] VM info + link sent to backend: {browser_url}")
 
         # 8. Auto shutdown after duration
@@ -774,12 +663,12 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
         payload = {
             "mode":     "physical",
             "status":   "reserved",
-            "hostname": socket.gethostname(),
+            "hostname": NODE_NAME,
             "ip":       get_ip(),
             "username": HOST_USERNAME,
             "password": HOST_PASSWORD,
         }
-        requests.post(ready_url, json=payload, timeout=10)
+        API.post(ready_url, json=payload, timeout=10)
         print("[agent.py] Host PC info sent to backend")
 
         def shutdown_physical():
@@ -798,11 +687,13 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
 def command_polling_loop():
     while True:
         try:
-            poll_url = f"{BACKEND_BASE_URL}/agent/tasks/poll/{socket.gethostname()}"
-            r    = requests.get(poll_url, timeout=15)
+            poll_url = f"{BACKEND_BASE_URL}/agent/tasks/poll/{NODE_NAME}"
+            r    = API.get(poll_url, timeout=15)
             data = r.json()
 
-            if data.get("command") == "start":
+            if data.get("command") == "start" and data.get("mode") == "job":
+                threading.Thread(target=pool.run_job, args=(data,), daemon=True).start()
+            elif data.get("command") == "start":
                 threading.Thread(
                     target=start_vm_for_task,
                     kwargs={
@@ -819,6 +710,9 @@ def command_polling_loop():
                         "fed_round":        data.get("round", 1),
                         "global_weights":   data.get("global_weights", None),
                         "global_intercept": data.get("global_intercept", None),
+                        "cores":            data.get("cores", 1),
+                        "ram_mb":           data.get("ram_mb", 2048),
+                        "disk_mb":          data.get("disk_mb", 3072),
                     },
                     daemon=True
                 ).start()
@@ -840,21 +734,10 @@ if __name__ == "__main__":
     print(f"Default VM   : {DEFAULT_VM}")
     print(f"Task Map     : {TASK_VM_MAP}")
     print(f"Heartbeat    : every {HEARTBEAT_INTERVAL} seconds")
-    print(f"Node name    : {socket.gethostname()}")
-    if REMOTE_METHOD == "rustdesk":
-        rd_id = rustdesk_get_id()
-        print(f"Remote mode  : RustDesk ({RUSTDESK_EXE}), ID {rd_id or 'unknown'}")
-        if not is_admin():
-            print("WARNING      : not running as administrator - Remote requests will fail.")
-            print("               Close this window and start start_agent.bat again (it asks for admin).")
-        else:
-            rustdesk_lock()
-            print("               RustDesk password reset; it is only shared during a session.")
-    elif REMOTE_METHOD == "vm":
-        print("Remote mode  : Hyper-V VMs (use_hyperv_vms.txt found)")
-    else:
-        print("Remote mode  : NOT AVAILABLE - RustDesk not found at C:\\Program Files\\RustDesk\\rustdesk.exe")
-        print("               Install RustDesk (or put its full path in rustdesk_path.txt) and restart.")
+    print(f"Node name    : {NODE_NAME}")
+    print(f"Device key   : {'yes - verified pool device' if pool.KEYED else 'NO (lab PC mode) - join from the website to contribute'}")
+    print(f"Sandbox      : {pool.detect_sandbox()}  (docker = full isolation; light = owner allowed jobs without Docker)")
+    print(f"Pool storage : {pool.STORAGE_DIR}")
     print("=" * 40)
 
     for attempt in range(1, 4):
@@ -865,16 +748,18 @@ if __name__ == "__main__":
 
     threading.Thread(target=heartbeat_loop,       daemon=True).start()
     threading.Thread(target=command_polling_loop, daemon=True).start()
-    if REMOTE_METHOD == "rustdesk":
-        threading.Thread(target=rustdesk_watch_loop, daemon=True).start()
+    pool.start_background()
 
     print("Heartbeat loop started")
     print("Command polling loop started")
-    print("Flask running on 0.0.0.0:5000")
+    print("Local status page on 127.0.0.1 only")
     print("=" * 40)
 
+    # The local status page is for this PC only (127.0.0.1). Pool devices open no ports:
+    # all pool traffic is outgoing HTTPS to the CRMS backend.
+    port = int(os.environ.get("CRMS_AGENT_PORT", "5000"))
     try:
-        app.run(host="0.0.0.0", port=5000)
+        app.run(host="127.0.0.1", port=port)
     except OSError as e:
-        print(f"[FAILED] Port 5000 is already in use ({e}).")
+        print(f"[FAILED] Port {port} is already in use ({e}).")
         print("         Another agent (for example the local one) is still running - close it and start again.")

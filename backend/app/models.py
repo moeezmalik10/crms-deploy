@@ -46,6 +46,24 @@ class Node(db.Model):
     node_type = db.Column(db.String(20), default="remote")
     is_busy = db.Column(db.Boolean, default=False) 
 
+    # ---- Resource pool (contributed devices) ----
+    owner_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)  # student who contributed it
+    device_key_hash = db.Column(db.String(64))      # sha256 of the device key; agents must present the key
+    lan_ip = db.Column(db.String(64))
+    public_ip = db.Column(db.String(64))
+    os_name = db.Column(db.String(120))
+    cpu_model = db.Column(db.String(160))
+    cpu_ghz = db.Column(db.Float)
+    total_storage_gb = db.Column(db.Float)
+    free_storage_gb = db.Column(db.Float)
+    share_cores = db.Column(db.Float)               # how much the owner lends (None = everything free)
+    share_ram_mb = db.Column(db.Float)
+    share_storage_gb = db.Column(db.Float)
+    paused = db.Column(db.Boolean, default=False)
+    allow_light_sandbox = db.Column(db.Boolean, default=False)  # run jobs without Docker (less isolation)
+    sandbox_mode = db.Column(db.String(20))         # docker / light / none, reported by the agent
+    agent_version = db.Column(db.String(20))
+
     metrics = db.relationship("NodeMetrics", backref="node", lazy=True)
     tasks = db.relationship("TaskRequest", backref="assigned_node", lazy=True)
     # Link for easier log auditing
@@ -124,6 +142,16 @@ class TaskRequest(db.Model):
 
     execution_logs = db.relationship("TaskExecutionLog", backref="task", lazy=True, cascade="all, delete-orphan")
 
+    # ---- Pool compute jobs (mode = "job") ----
+    required_disk_mb = db.Column(db.Float)
+    job_runtime = db.Column(db.String(20))          # python / cpp
+    job_entry = db.Column(db.String(255))           # file to run inside the uploaded zip
+    job_args = db.Column(db.String(500))
+    input_blob_id = db.Column(db.Integer)
+    result_blob_id = db.Column(db.Integer)
+    exit_code = db.Column(db.Integer)
+    output_tail = db.Column(db.Text)
+
 # =========================
 # Machine Learning Results (For storing trained models and metadata)
 # =========================
@@ -155,3 +183,71 @@ class TaskExecutionLog(db.Model):
     status = db.Column(db.String(20)) 
     message = db.Column(db.Text)
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+# =========================
+# RESOURCE POOL
+# =========================
+class DeviceEnrollment(db.Model):
+    """One-time join code a student creates on the website to add a device to the pool."""
+    __tablename__ = "device_enrollment"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    code_hash = db.Column(db.String(64), nullable=False, index=True)
+    share_cores = db.Column(db.Float)
+    share_ram_mb = db.Column(db.Float)
+    share_storage_gb = db.Column(db.Float)
+    allow_light_sandbox = db.Column(db.Boolean, default=False)
+    expires_at = db.Column(db.DateTime(timezone=True))
+    used_at = db.Column(db.DateTime(timezone=True))
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"))
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PoolBlob(db.Model):
+    """Small binary objects kept by the server: job inputs/results and chunks in transit."""
+    __tablename__ = "pool_blob"
+    id = db.Column(db.Integer, primary_key=True)
+    owner_user_id = db.Column(db.Integer)
+    kind = db.Column(db.String(20))                 # job_input / job_result / chunk
+    name = db.Column(db.String(255))
+    size = db.Column(db.Integer)
+    data = db.Column(db.LargeBinary)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PoolFile(db.Model):
+    """A file in pooled storage. Its encrypted chunks live on contributors' disks."""
+    __tablename__ = "pool_file"
+    id = db.Column(db.Integer, primary_key=True)
+    owner_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    name = db.Column(db.String(255))
+    size = db.Column(db.BigInteger)
+    sha256 = db.Column(db.String(64))
+    wrapped_key = db.Column(db.Text)                # file key, encrypted with the server master key
+    chunk_count = db.Column(db.Integer)
+    replicas_wanted = db.Column(db.Integer, default=2)
+    status = db.Column(db.String(20), default="replicating")   # replicating / stored / deleting
+    download_requested_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    chunks = db.relationship("PoolChunk", backref="file", lazy=True, cascade="all, delete-orphan")
+
+
+class PoolChunk(db.Model):
+    __tablename__ = "pool_chunk"
+    id = db.Column(db.Integer, primary_key=True)
+    file_id = db.Column(db.Integer, db.ForeignKey("pool_file.id"), nullable=False)
+    idx = db.Column(db.Integer)
+    size = db.Column(db.Integer)                    # encrypted size
+    sha256 = db.Column(db.String(64))               # of the encrypted bytes
+    tmp_blob_id = db.Column(db.Integer)             # server copy while replicating / downloading
+    replicas = db.relationship("PoolReplica", backref="chunk", lazy=True, cascade="all, delete-orphan")
+
+
+class PoolReplica(db.Model):
+    __tablename__ = "pool_replica"
+    id = db.Column(db.Integer, primary_key=True)
+    chunk_id = db.Column(db.Integer, db.ForeignKey("pool_chunk.id"), nullable=False)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False)
+    status = db.Column(db.String(20), default="pending")       # pending / stored / deleting
+    updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

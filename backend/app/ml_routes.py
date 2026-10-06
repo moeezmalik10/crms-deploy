@@ -5,6 +5,7 @@ import math
 import traceback
 from flask import Response
 from flask import Blueprint, request, jsonify
+from app.pool_security import agent_auth, task_belongs_to_caller
 from app import db
 from app.models import TaskRequest, MLResult
 from app.ml_orchestrator import spawn_distributed_ml, aggregate_ml_results
@@ -161,6 +162,7 @@ def start_training():
 # RECEIVE AGENT RESULT
 # =========================
 @ml_bp.route("/agent/tasks/<int:task_id>/result", methods=["POST"])
+@agent_auth()
 def receive_ml_result(task_id):
     try:
         data = request.json
@@ -172,6 +174,8 @@ def receive_ml_result(task_id):
 
         if not child_task:
             return jsonify({"error": "Task not found"}), 404
+        if not task_belongs_to_caller(child_task):
+            return jsonify({"error": "not your task"}), 403
 
         # STATUS UPDATE
         child_task.status = "completed"
