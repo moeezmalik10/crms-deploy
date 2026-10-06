@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 from flask import Blueprint, Response, g, jsonify, request
 
 from app import db
-from app.allocation_engine import log_event
+from app.allocation_engine import allocate_task, log_event
 from app.models import DeviceEnrollment, Node, PoolBlob, PoolChunk, PoolFile, PoolReplica, TaskRequest
 from app.pool_security import agent_auth, new_device_key, sha256_hex, client_public_ip
 
@@ -119,6 +119,18 @@ def job_result(task_id):
     task.message = msg
     log_event(task.id, g.node.id, task.status, msg)
     db.session.commit()
+
+    # The device has room again: hand it the next waiting part of a split job straight
+    # away instead of waiting for the next queue round.
+    if task.parent_task_id:
+        waiting = TaskRequest.query.filter_by(parent_task_id=task.parent_task_id, status="pending") \
+                                   .order_by(TaskRequest.chunk_id.asc()).first()
+        if waiting:
+            try:
+                allocate_task(waiting.id)
+            except Exception as e:   # the regular queue round will retry
+                db.session.rollback()
+                print(f"[pool] could not place part {waiting.chunk_id} now: {e}")
     return jsonify({"status": task.status}), 200
 
 

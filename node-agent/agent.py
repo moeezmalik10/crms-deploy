@@ -681,15 +681,19 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
 
 # =====================
 # COMMAND POLLING LOOP
-# Polls backend every 15 seconds for new tasks.
+# Polls the backend for new tasks: every 5 seconds on a pool device (so split-job parts start
+# quickly), every 15 seconds on a lab PC; straight away again after receiving work.
 # Backend sends task_name so agent knows which VM to start.
 # =====================
 def command_polling_loop():
+    idle_wait = 5 if pool.KEYED else 15
     while True:
+        got_work = False
         try:
             poll_url = f"{BACKEND_BASE_URL}/agent/tasks/poll/{NODE_NAME}"
             r    = API.get(poll_url, timeout=15)
             data = r.json()
+            got_work = data.get("command") == "start"
 
             if data.get("command") == "start" and data.get("mode") == "job":
                 threading.Thread(target=pool.run_job, args=(data,), daemon=True).start()
@@ -720,7 +724,7 @@ def command_polling_loop():
         except Exception as e:
             print(f"Polling error: {e}")
 
-        time.sleep(15)
+        time.sleep(1 if got_work else idle_wait)
 
 
 # =====================

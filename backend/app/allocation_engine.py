@@ -79,17 +79,25 @@ def allocate_task(task_id):
         if task.mode != "physical":
             nodes = [n for n in nodes if not (n.name or "").upper().startswith("WEB-")]
         # The owner paused sharing
+        online_count = len(nodes)
         nodes = [n for n in nodes if not n.paused]
         # Sandboxed work needs a device that can isolate it
+        no_node_reason = "No online nodes available. Queued."
         if task.mode == "job":
             nodes = [n for n in nodes if n.device_key_hash and (
                 n.sandbox_mode == "docker" or (n.sandbox_mode == "light" and n.allow_light_sandbox))]
+            if online_count and not nodes:
+                no_node_reason = ("Queued: no online device can run jobs yet - a contributor needs Docker Desktop "
+                                  "running (or must allow jobs without Docker on Contribute Resources).")
         elif task.mode == "remote":
             nodes = [n for n in nodes if n.sandbox_mode == "docker"]
+            if online_count and not nodes:
+                no_node_reason = ("Queued: workspaces need a device with Docker Desktop running; "
+                                  f"{online_count} device(s) are online but none has Docker.")
 
         if not nodes:
             task.status = "pending"
-            log_event(task.id, None, "queued", "No online nodes available. Queued.")
+            log_event(task.id, None, "queued", no_node_reason)
             db.session.commit()
             return {"status": "pending", "message": "No online nodes."}
 
@@ -158,13 +166,15 @@ def allocate_task(task_id):
             buffer_ram = 768
             buffer_cores = total_cores * 0.05
 
-            # The owner's share limits cap what this device lends
+            # The owner's share limits cap what this device lends to sandboxed work (jobs and
+            # workspaces). A physical session reserves the whole device, as before.
             cap_cpu = total_cores - buffer_cores
             cap_ram = total_ram - buffer_ram
-            if node.share_cores:
-                cap_cpu = min(cap_cpu, node.share_cores)
-            if node.share_ram_mb:
-                cap_ram = min(cap_ram, node.share_ram_mb)
+            if task.mode != "physical":
+                if node.share_cores:
+                    cap_cpu = min(cap_cpu, node.share_cores)
+                if node.share_ram_mb:
+                    cap_ram = min(cap_ram, node.share_ram_mb)
             avail_cpu = max(0, cap_cpu - stats["cpu"])
             avail_ram = max(0, cap_ram - stats["ram"])
 
@@ -205,6 +215,13 @@ def allocate_task(task_id):
                 
                 # Mild fairness
                 score -= task_count * 300
+
+                # Parts of one split job go to different devices when possible, so they
+                # really run in parallel instead of queueing for the same CPU.
+                if task.parent_task_id:
+                    siblings = sum(1 for t in active_tasks if t.assigned_node_id == node.id
+                                   and t.parent_task_id == task.parent_task_id and t.id != task.id)
+                    score -= siblings * 50000
                 
                 # live metric validation
                 live_safe_ram = profile["ram"] + 768

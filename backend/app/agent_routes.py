@@ -39,6 +39,13 @@ def _settings(node):
     }
 
 
+def _parts_of(task):
+    if not task.parent_task_id:
+        return 1
+    parent = db.session.get(TaskRequest, task.parent_task_id)
+    return (parent.chunk_id if parent and parent.chunk_id else 1)
+
+
 @agent_bp.route("/register_node", methods=["POST"])
 @agent_auth()
 def register_node():
@@ -165,6 +172,9 @@ def poll_tasks(pc_name):
             "disk_mb": task.required_disk_mb or 500,
             "max_minutes": task.duration_minutes or 10,
             "input_path": f"/agent/jobs/{task.id}/input",
+            # For a job split across devices: which part this is and how many there are
+            "part": (task.chunk_id or 1) if task.parent_task_id else 1,
+            "parts": _parts_of(task),
         }), 200
    
     if "ml" in task.task_type:

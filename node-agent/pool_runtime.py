@@ -333,6 +333,7 @@ def run_job(cmd):
     cores, ram_mb = float(cmd.get("cores") or 1), int(cmd.get("ram_mb") or 1024)
     disk_mb, minutes = float(cmd.get("disk_mb") or 500), float(cmd.get("max_minutes") or 10)
     args = cmd.get("args") or ""
+    part, parts = int(cmd.get("part") or 1), int(cmd.get("parts") or 1)
     mode = SANDBOX
     try:
         if mode == "none":
@@ -349,12 +350,12 @@ def run_job(cmd):
         if not re.fullmatch(r"[\w./ -]+", entry) or ".." in entry:
             return report_error(task_id, "invalid entry file name")
         _post(f"/agent/tasks/{task_id}/ready", json={"mode": "job", "sandbox": mode}, timeout=30)
-        log(f"job {task_id}: {runtime} {entry} in a {mode} sandbox ({cores:g} core, {ram_mb} MB, {disk_mb:g} MB disk, {minutes:g} min)")
+        log(f"job {task_id}: {runtime} {entry}{f' part {part}/{parts}' if parts > 1 else ''} in a {mode} sandbox ({cores:g} core, {ram_mb} MB, {disk_mb:g} MB disk, {minutes:g} min)")
 
         if mode == "docker":
-            code, out, reason = _run_job_docker(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel)
+            code, out, reason = _run_job_docker(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel, part, parts)
         else:
-            code, out, reason = _run_job_light(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel)
+            code, out, reason = _run_job_light(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel, part, parts)
 
         if cancel.is_set() and not reason:
             reason = "cancelled"
@@ -403,7 +404,7 @@ def _watch(task_id, proc_alive, kill, work, disk_mb, minutes, cancel, extra_size
     return ""
 
 
-def _run_job_docker(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel):
+def _run_job_docker(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel, part=1, parts=1):
     name = f"crms-job-{task_id}"
     _docker(["rm", "-f", name], timeout=60)
     shell = _job_command(runtime, entry, args)
@@ -415,6 +416,7 @@ def _run_job_docker(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb,
                   "--read-only", "--tmpfs", "/tmp:rw,exec,size=256m,mode=1777",
                   "-v", f"{work}:/work", "-w", "/work", "--user", "1000:1000",
                   "-e", "HOME=/tmp", "-e", "PYTHONDONTWRITEBYTECODE=1",
+                  "-e", f"CRMS_PART={part}", "-e", f"CRMS_PARTS={parts}",
                   JOB_IMAGES[runtime], "sh", "-c", shell]
     log_path = os.path.join(work, "..", f"job_{task_id}.log")
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
@@ -431,7 +433,7 @@ def _run_job_docker(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb,
     return code, out, reason
 
 
-def _run_job_light(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel):
+def _run_job_light(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel, part=1, parts=1):
     """No Docker: run as a normal low-priority process with CPU, RAM, disk and time limits.
     Only used when the owner allowed it - the program is not isolated from this PC's files."""
     if runtime == "python":
@@ -448,6 +450,7 @@ def _run_job_light(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, 
         argv = [exe] + (args.split() if args else [])
     env = {k: v for k, v in os.environ.items() if k.upper() in ("PATH", "SYSTEMROOT", "TEMP", "TMP", "LANG")}
     env["HOME"] = work
+    env["CRMS_PART"], env["CRMS_PARTS"] = str(part), str(parts)
     log_path = os.path.join(WORK_DIR, f"job_{task_id}.log")
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         flags = NO_WINDOW | (0x00004000 if IS_WINDOWS else 0)   # BELOW_NORMAL_PRIORITY_CLASS
