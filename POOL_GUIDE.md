@@ -13,6 +13,7 @@ remotely through **sandboxes**. Nobody gets another student's desktop or files.
 | **Run a Job**: upload Python/C++ (or a zip), choose cores/RAM/disk/time; it runs in a sandbox on a free device; download the results. | Student menu → Run a Job |
 | **Workspace** (request mode "Workspace (in browser)"): VS Code in the browser in a sandbox with its own CPU/RAM/disk slice, via a private https link + password; deleted when the time ends. | New Request → Workspace; then My Workspace |
 | **Pool Storage**: files are encrypted (AES-256-GCM), split into 4 MB parts and kept on **two** contributors' disks; still downloadable when one PC is off. | Student menu → Pool Storage |
+| **Split a job across devices**: choose 2-8 parts; each part runs at the same time on a different device, and a CSV data file is shared out by rows. Results come back as one zip with the CSV outputs merged, plus the time saved. | Run a Job → Split across devices |
 | **Offline detection**: a PC that is switched off shows **Offline** within about a minute; its unstarted requests move to another device. | Automatic |
 
 ## Security
@@ -62,3 +63,37 @@ remotely through **sandboxes**. Nobody gets another student's desktop or files.
 | Switch one of the two PCs off, Prepare download, Download | File downloads unchanged |
 | Request **Workspace (in browser)**, open My Workspace | https link + password; VS Code opens; deleted when time ends or session is deleted |
 | Pause sharing on a device | No new work is placed on it |
+
+## Combining devices for one job (split jobs)
+
+A single running program cannot use the RAM or CPU of two PCs at once: memory over the network is
+thousands of times slower than local memory, so "merging" two PCs into one big computer would make it slower,
+not faster. The pool combines devices the way real clusters do: the work is **divided** and every device runs its
+own part **at the same time**.
+
+* Run a Job → **Split across devices** = 2-8 parts. Cores, memory and disk are **per part**.
+* Optional **data file** (CSV/TXT): rows are shared out, each part gets its own slice (the header row is kept in every part).
+* Inside the program, `CRMS_PART` and `CRMS_PARTS` say which part it is (e.g. 2 of 3).
+* When all parts finish, **Download merged results** gives `part_1/`, `part_2/`, ..., `merged/<name>.csv`
+  (CSV outputs joined into one) and `summary.txt`.
+* The page shows where each part ran, how long it took, and how much faster the split was.
+
+What keeps it fast:
+
+* Parts are placed on **different devices** first; a device is only given a second part if it has spare cores.
+* When a part finishes, the next waiting part is placed at once.
+* Pool devices check for work every 5 seconds (lab PCs every 15).
+* Each part needs a few seconds to start, so split jobs that take more than about a minute.
+  Local test: 24-row prime count took 33 s on one device and 18 s split in 2 parts (1.8x faster).
+
+Example program (`main.py`, with a data file `numbers.csv` that has a column `n`):
+
+```python
+import csv, os
+rows = list(csv.DictReader(open("numbers.csv")))        # only this part's rows
+print("part", os.environ["CRMS_PART"], "of", os.environ["CRMS_PARTS"], "-", len(rows), "rows")
+with open("output/result.csv", "w", newline="") as f:
+    w = csv.writer(f); w.writerow(["n", "square"])
+    for r in rows:
+        w.writerow([r["n"], int(r["n"]) ** 2])
+```

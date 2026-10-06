@@ -23,7 +23,8 @@ def request_task_frontend():
     # GUARD CHECK: Ensure User ID cannot have more than one non-terminal task
     active_task = TaskRequest.query.filter(
         TaskRequest.user_id == user_id,
-        TaskRequest.status.in_(["pending", "starting", "running", "queued"])
+        TaskRequest.status.in_(["pending", "starting", "running", "queued"]),
+        TaskRequest.mode.notin_(["job", "job_group"])   # pool jobs don't block a session
     ).first()
 
     if active_task:

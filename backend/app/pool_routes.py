@@ -271,9 +271,38 @@ def _job_json(t):
     }
 
 
+MAX_PARTS = 8
+
+
+def _read_zip(data):
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        return {n: z.read(n) for n in z.namelist() if not n.endswith("/")}
+
+
+def _make_zip(files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, b in files.items():
+            z.writestr(n, b)
+    return buf.getvalue()
+
+
+def _split_lines(data, parts, header):
+    """Split a text/CSV file into `parts` nearly equal row ranges; each part keeps the header."""
+    lines = data.decode("utf-8", errors="replace").splitlines(keepends=True)
+    head, rows = (lines[:1], lines[1:]) if header and lines else ([], lines)
+    out, n = [], len(rows)
+    for i in range(parts):
+        a, b = (n * i) // parts, (n * (i + 1)) // parts
+        out.append("".join(head + rows[a:b]).encode("utf-8"))
+    return out
+
+
 @pool_bp.route("/pool/jobs", methods=["POST"])
 @jwt_required()
 def submit_job():
+    """Submit a job. With parts > 1 the job is split across several devices that run at the
+    same time; each part gets CRMS_PART / CRMS_PARTS and (optionally) its own slice of the data."""
     user, _ = _me()
     f = request.files.get("file")
     if not f:
@@ -288,17 +317,14 @@ def submit_job():
     entry = (request.form.get("entry") or "").strip() or ("main.py" if runtime == "python" else "main.cpp")
     if name.lower().endswith(".zip"):
         try:
-            names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+            program = _read_zip(data)
         except zipfile.BadZipFile:
             return jsonify({"error": "the .zip file is damaged"}), 400
-        if entry not in names:
-            return jsonify({"error": f"{entry} is not inside the zip (found: {', '.join(names[:8])})"}), 400
+        if entry not in program:
+            return jsonify({"error": f"{entry} is not inside the zip (found: {', '.join(list(program)[:8])})"}), 400
     else:
         entry = name
-    active = TaskRequest.query.filter(TaskRequest.user_id == user.id, TaskRequest.mode == "job",
-                                      TaskRequest.status.in_(("pending",) + ACTIVE)).count()
-    if active >= 3:
-        return jsonify({"error": "you already have 3 jobs waiting or running"}), 400
+        program = {name: data}
 
     def num(key, lo, hi, default):
         try:
@@ -306,31 +332,122 @@ def submit_job():
         except ValueError:
             return default
 
-    blob = PoolBlob(owner_user_id=user.id, kind="job_input", name=name, size=len(data), data=data)
-    db.session.add(blob)
+    parts = int(num("parts", 1, MAX_PARTS, 1))
+    dfile = request.files.get("data")
+    data_name, data_parts = None, None
+    if dfile and dfile.filename:
+        raw = dfile.read(MAX_JOB_INPUT + 1)
+        if len(raw) > MAX_JOB_INPUT:
+            return jsonify({"error": "data file is larger than 10 MB"}), 400
+        data_name = os.path.basename(dfile.filename)
+        header = request.form.get("header", "1") not in ("0", "false", "off")
+        data_parts = _split_lines(raw, parts, header) if parts > 1 else [raw]
+
+    active_singles = TaskRequest.query.filter(TaskRequest.user_id == user.id, TaskRequest.mode == "job",
+                                              TaskRequest.parent_task_id.is_(None),
+                                              TaskRequest.status.in_(("pending",) + ACTIVE)).count()
+    active_groups = sum(1 for g in TaskRequest.query.filter_by(user_id=user.id, mode="job_group").all()
+                        if any(c.status in ("pending",) + ACTIVE for c in g.sub_tasks))
+    if active_singles + active_groups >= 3:
+        return jsonify({"error": "you already have 3 jobs waiting or running"}), 400
+
+    common = dict(user_id=user.id, task_type=f"job_{runtime}", job_runtime=runtime, job_entry=entry,
+                  job_args=(request.form.get("args") or "")[:500],
+                  required_cpu=int(num("cores", 1, 16, 1)), required_ram_mb=num("ram_mb", 128, 32768, 1024),
+                  required_disk_mb=num("disk_mb", 50, 20480, 500), duration_minutes=int(num("max_minutes", 1, 240, 10)))
+    now = datetime.now(timezone.utc)
+
+    def add_input(files, label):
+        payload = _make_zip(files) if (len(files) > 1 or label.endswith(".zip")) else next(iter(files.values()))
+        fname = label if len(files) == 1 and not label.endswith(".zip") else (label if label.endswith(".zip") else "job.zip")
+        blob = PoolBlob(owner_user_id=user.id, kind="job_input", name=fname, size=len(payload), data=payload)
+        db.session.add(blob)
+        db.session.flush()
+        return blob.id
+
+    if parts == 1:
+        files = dict(program)
+        if data_parts:
+            files[data_name] = data_parts[0]
+        label = name if (len(files) == 1) else "job.zip"
+        task = TaskRequest(mode="job", status="pending", input_blob_id=add_input(files, label), created_at=now, **common)
+        db.session.add(task)
+        db.session.flush()
+        log_event(task.id, None, "pending", "Job submitted")
+        db.session.commit()
+        result = allocate_task(task.id)
+        return jsonify({"job": _job_json(TaskRequest.query.get(task.id)), "allocation": result})
+
+    # Split job: a group with one part per device
+    group = TaskRequest(mode="job_group", status="group", created_at=now, chunk_id=parts,
+                        message=f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else ""),
+                        **common)
+    db.session.add(group)
     db.session.flush()
-    task = TaskRequest(
-        user_id=user.id, task_type=f"job_{runtime}", mode="job", status="pending",
-        job_runtime=runtime, job_entry=entry, job_args=(request.form.get("args") or "")[:500],
-        required_cpu=int(num("cores", 1, 16, 1)), required_ram_mb=num("ram_mb", 128, 32768, 1024),
-        required_disk_mb=num("disk_mb", 50, 20480, 500), duration_minutes=int(num("max_minutes", 1, 240, 10)),
-        input_blob_id=blob.id, created_at=datetime.now(timezone.utc))
-    db.session.add(task)
-    db.session.flush()
-    log_event(task.id, None, "pending", "Job submitted")
+    children = []
+    for i in range(parts):
+        files = dict(program)
+        if data_parts:
+            files[data_name] = data_parts[i]
+        child = TaskRequest(mode="job", status="pending", parent_task_id=group.id, chunk_id=i + 1,
+                            input_blob_id=add_input(files, "job.zip"), created_at=now, **common)
+        db.session.add(child)
+        db.session.flush()
+        log_event(child.id, None, "pending", f"Part {i + 1} of {parts} submitted")
+        children.append(child.id)
     db.session.commit()
-    result = allocate_task(task.id)
-    return jsonify({"job": _job_json(TaskRequest.query.get(task.id)), "allocation": result})
+    allocations = [allocate_task(cid) for cid in children]
+    return jsonify({"job": _group_json(TaskRequest.query.get(group.id)), "allocation": allocations})
+
+
+def _group_json(g):
+    kids = sorted(g.sub_tasks, key=lambda c: c.chunk_id or 0)
+    states = [c.status for c in kids]
+    if any(s in ACTIVE + ("pending",) for s in states):
+        status = "running" if any(s in ("running", "starting") for s in states) else (
+            "allocated" if any(s == "allocated" for s in states) else "pending")
+    else:
+        status = "failed" if any(s == "failed" for s in states) else "completed"
+    starts = [_aware(c.start_time) for c in kids if c.start_time]
+    ends = [_aware(c.completed_at) for c in kids if c.completed_at]
+    durations = [(_aware(c.completed_at) - _aware(c.start_time)).total_seconds()
+                 for c in kids if c.start_time and c.completed_at]
+    wall = (max(ends) - min(starts)).total_seconds() if starts and ends and status in ("completed", "failed") else None
+    reason = ""
+    for c in kids:
+        if c.status in ("pending", "failed"):
+            last = TaskExecutionLog.query.filter_by(task_id=c.id).order_by(TaskExecutionLog.id.desc()).first()
+            reason = f"Part {c.chunk_id}: {last.message}" if last else ""
+            break
+    j = {
+        "id": g.id, "group": True, "runtime": g.job_runtime, "entry": g.job_entry, "args": g.job_args,
+        "cores": g.required_cpu, "ram_mb": g.required_ram_mb, "disk_mb": g.required_disk_mb,
+        "max_minutes": g.duration_minutes, "status": status, "note": g.message,
+        "devices": sorted({c.assigned_pc for c in kids if c.assigned_pc}),
+        "created_at": _aware(g.created_at).isoformat() if g.created_at else None,
+        "parts": [{"part": c.chunk_id, "status": c.status, "device": c.assigned_pc, "exit_code": c.exit_code,
+                   "seconds": round((_aware(c.completed_at) - _aware(c.start_time)).total_seconds(), 1)
+                   if c.start_time and c.completed_at else None} for c in kids],
+        "parts_done": sum(1 for s in states if s in ("completed", "failed")),
+        "wall_seconds": round(wall, 1) if wall is not None else None,
+        "work_seconds": round(sum(durations), 1) if durations else None,
+        "output": "\n".join(f"===== part {c.chunk_id} on {c.assigned_pc or '-'} =====\n{c.output_tail or ''}" for c in kids
+                            if c.output_tail),
+        "has_result": any(c.result_blob_id for c in kids), "reason": reason, "exit_code": None,
+    }
+    return j
 
 
 @pool_bp.route("/pool/jobs", methods=["GET"])
 @jwt_required()
 def list_jobs():
     user, role = _me()
-    q = TaskRequest.query.filter(TaskRequest.mode == "job")
+    q = TaskRequest.query.filter(
+        ((TaskRequest.mode == "job") & TaskRequest.parent_task_id.is_(None)) | (TaskRequest.mode == "job_group"))
     if not (role == "admin" and request.args.get("all")):
         q = q.filter(TaskRequest.user_id == user.id)
-    return jsonify([_job_json(t) for t in q.order_by(TaskRequest.id.desc()).limit(50).all()])
+    return jsonify([_group_json(t) if t.mode == "job_group" else _job_json(t)
+                    for t in q.order_by(TaskRequest.id.desc()).limit(50).all()])
 
 
 @pool_bp.route("/pool/jobs/<int:task_id>/result", methods=["GET"])
@@ -340,11 +457,40 @@ def job_result_download(task_id):
     t = TaskRequest.query.get_or_404(task_id)
     if t.user_id != user.id and role != "admin":
         return jsonify({"error": "not your job"}), 403
+    if t.mode == "job_group":
+        return _group_result(t)
     blob = PoolBlob.query.get(t.result_blob_id) if t.result_blob_id else None
     if not blob:
         return jsonify({"error": "no result file"}), 404
     return Response(blob.data, mimetype="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{blob.name}"'})
+
+
+def _group_result(g):
+    """One zip for the whole split job: every part's files, plus CSV outputs merged back together."""
+    kids = sorted(g.sub_tasks, key=lambda c: c.chunk_id or 0)
+    files, csvs, summary = {}, {}, [f"Job #{g.id}: {g.message}", ""]
+    for c in kids:
+        secs = (_aware(c.completed_at) - _aware(c.start_time)).total_seconds() if c.start_time and c.completed_at else None
+        summary.append(f"part {c.chunk_id}: {c.status} on {c.assigned_pc or '-'}"
+                       + (f" in {secs:.1f} s" if secs is not None else "") + f" (exit code {c.exit_code})")
+        blob = PoolBlob.query.get(c.result_blob_id) if c.result_blob_id else None
+        if not blob:
+            continue
+        for n, b in _read_zip(blob.data).items():
+            files[f"part_{c.chunk_id}/{n}"] = b
+            if n.lower().endswith(".csv"):
+                csvs.setdefault(n, []).append(b)
+    for n, pieces in csvs.items():
+        if len(pieces) == len(kids):   # same file from every part -> merge rows, keep one header
+            first = pieces[0].decode("utf-8", errors="replace").splitlines(keepends=True)
+            merged = first[:]
+            for p in pieces[1:]:
+                merged += p.decode("utf-8", errors="replace").splitlines(keepends=True)[1:]
+            files[f"merged/{n}"] = "".join(merged).encode("utf-8")
+    files["summary.txt"] = "\n".join(summary).encode("utf-8")
+    return Response(_make_zip(files), mimetype="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="job_{g.id}_all_parts.zip"'})
 
 
 @pool_bp.route("/pool/jobs/<int:task_id>", methods=["DELETE"])
@@ -354,6 +500,23 @@ def delete_job(task_id):
     t = TaskRequest.query.get_or_404(task_id)
     if t.user_id != user.id and role != "admin":
         return jsonify({"error": "not your job"}), 403
+    if t.mode == "job_group":
+        active = [c for c in t.sub_tasks if c.status in ACTIVE + ("pending",)]
+        if active:
+            for c in active:
+                c.status = "failed"
+                c.completed_at = datetime.now(timezone.utc)
+                c.message = "Cancelled by the student"
+                log_event(c.id, c.assigned_node_id, "failed", "Cancelled by the student")
+            db.session.commit()
+            return jsonify({"status": "cancelled"})
+        for c in t.sub_tasks:
+            for bid in (c.input_blob_id, c.result_blob_id):
+                if bid:
+                    PoolBlob.query.filter_by(id=bid).delete()
+        db.session.delete(t)
+        db.session.commit()
+        return jsonify({"status": "deleted"})
     if t.status in ACTIVE or t.status == "pending":
         # The agent sees the new status within seconds and removes the sandbox
         t.status = "failed"

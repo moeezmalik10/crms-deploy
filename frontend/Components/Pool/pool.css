@@ -138,3 +138,17 @@
   .pool table.devices td:first-child { grid-column: 1 / -1; }
   .pool .clip { max-width: 100%; }
 }
+
+/* split jobs */
+.pool .split { display: grid; gap: 14px; grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 720px) { .pool .split { grid-template-columns: 1fr 1fr 1fr; } }
+.pool label.check { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; }
+@media (min-width: 720px) { .pool .split label.check { margin-top: 30px; } }
+.pool label.check input { width: 16px; height: 16px; accent-color: var(--ink); }
+.pool .parts { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.pool .part { border: 1px solid var(--line); border-left: 4px solid var(--off); border-radius: 9px; padding: 8px 10px; background: #fff; }
+.pool .part.running, .pool .part.starting, .pool .part.allocated { border-left-color: var(--lent); }
+.pool .part.completed { border-left-color: var(--free); }
+.pool .part.failed { border-left-color: var(--bad); }
+.pool .part.pending { border-left-color: var(--warn); }
+.pool code { font-family: "Lucida Console", Consolas, monospace; font-size: 0.85em; background: var(--paper); padding: 1px 5px; border-radius: 4px; }
