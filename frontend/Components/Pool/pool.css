@@ -1,0 +1,140 @@
+/* Resource-pool pages. Scoped under .pool so the app's global input/text rules don't leak in.
+   Palette: ink (sidebar), paper, free capacity (teal), lent capacity (indigo), offline (grey). */
+.pool {
+  --ink: #1e1e1e;
+  --paper: #f3f4f6;
+  --surface: #ffffff;
+  --line: #e2e4e9;
+  --muted: #6b7280;
+  --free: #0f766e;
+  --free-soft: #ccebe7;
+  --lent: #4338ca;
+  --lent-soft: #e0e0fb;
+  --off: #a1a7b3;
+  --warn: #b45309;
+  --bad: #c62828;
+  width: 100%;
+  min-height: 100vh;
+  padding: 28px 20px 48px;
+  text-align: left;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+@media (min-width: 768px) { .pool { padding: 36px 40px 64px; } }
+
+.pool h1 { font-size: 1.85rem; font-weight: 700; line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
+.pool h2 { font-size: 1.15rem; font-weight: 700; margin: 0 0 12px; }
+.pool p.lead { color: var(--muted); margin: 6px 0 0; max-width: 62ch; font-size: 0.95rem; line-height: 1.5; }
+.pool .wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
+.pool .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+.pool .panel.flat { background: transparent; border: none; padding: 0; }
+.pool .muted { color: var(--muted); }
+.pool .small { font-size: 0.82rem; }
+
+/* inputs (override the app-wide input rules) */
+.pool input[type="number"], .pool input[type="text"], .pool select, .pool textarea {
+  width: 100%; background: #fff; border: 1px solid #cfd3da; border-radius: 9px;
+  padding: 9px 11px; font-size: 0.92rem; outline: none;
+}
+.pool input:focus-visible, .pool select:focus-visible, .pool button:focus-visible, .pool a:focus-visible {
+  outline: 2px solid var(--lent); outline-offset: 2px;
+}
+.pool label.field { display: flex; flex-direction: column; gap: 5px; font-size: 0.85rem; font-weight: 600; }
+.pool label.field span.hint { font-weight: 400; color: var(--muted); font-size: 0.78rem; }
+
+.pool .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border-radius: 9px;
+  padding: 9px 16px; font-weight: 600; font-size: 0.9rem; border: 1px solid transparent; cursor: pointer; }
+.pool .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.pool .btn.primary { background: var(--ink); color: #fff; }
+.pool .btn.ghost { background: #fff; border-color: #cfd3da; color: var(--ink); }
+.pool .btn.danger { background: #fff; border-color: #f2b8b8; color: var(--bad); }
+.pool .btn.sm { padding: 6px 11px; font-size: 0.82rem; }
+
+.pool .err { background: #fdecec; color: var(--bad); border-radius: 9px; padding: 9px 12px; font-size: 0.88rem; }
+
+/* state dot */
+.pool .state { display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 600; }
+.pool .state i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.pool .state.online i { background: var(--free); box-shadow: 0 0 0 3px var(--free-soft); }
+.pool .state.paused i { background: var(--warn); }
+.pool .state.offline i { background: var(--off); }
+.pool .state.offline { color: var(--muted); }
+
+/* ---- the signature element: capacity strips built from each device's contribution ---- */
+.pool .strip { display: grid; grid-template-columns: 1fr; gap: 8px; }
+@media (min-width: 900px) { .pool .strip { grid-template-columns: 170px 1fr 210px; align-items: center; gap: 18px; } }
+.pool .strip .name { font-weight: 700; font-size: 1rem; }
+.pool .strip .name small { display: block; font-weight: 400; color: var(--muted); font-size: 0.78rem; margin-top: 2px; }
+.pool .bar { display: flex; gap: 3px; height: 38px; }
+.pool .seg { position: relative; min-width: 6px; height: 100%; border-radius: 5px; overflow: hidden;
+  background: var(--free-soft); }
+.pool .seg .used { position: absolute; inset: 0 auto 0 0; background: var(--lent); }
+.pool .seg .avail { position: absolute; inset: 0; background: var(--free); opacity: 0.85; }
+.pool .seg.paused .avail { background: var(--warn); opacity: 0.35; }
+.pool .seg.offline { background: repeating-linear-gradient(135deg, #e5e7eb 0 6px, #f3f4f6 6px 12px); }
+.pool .seg .tag { position: absolute; left: 7px; top: 50%; transform: translateY(-50%); color: #fff;
+  font-size: 0.72rem; font-weight: 600; white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,.35); pointer-events: none; }
+.pool .seg.offline .tag { color: var(--muted); text-shadow: none; }
+.pool .strip .figures { font-size: 0.9rem; }
+.pool .strip .figures b { font-size: 1.35rem; }
+.pool .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.8rem; color: var(--muted); }
+.pool .legend span { display: inline-flex; align-items: center; gap: 6px; }
+.pool .legend i { width: 14px; height: 10px; border-radius: 3px; display: inline-block; }
+
+/* facts line under the strips */
+.pool .facts { display: flex; flex-wrap: wrap; gap: 10px 28px; font-size: 0.9rem; }
+.pool .facts div b { font-size: 1.1rem; margin-right: 4px; }
+
+/* device table */
+.pool table.devices { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.pool table.devices th { text-align: left; font-weight: 600; color: var(--muted); font-size: 0.78rem;
+  padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.pool table.devices td { padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.pool table.devices tr.offline td { color: var(--muted); }
+.pool .meter { height: 5px; background: #eceef2; border-radius: 3px; margin-top: 5px; overflow: hidden; width: 110px; }
+.pool .meter i { display: block; height: 100%; background: var(--ink); }
+.pool .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.74rem; font-weight: 600;
+  background: #eef0f3; color: var(--ink); }
+.pool .chip.good { background: var(--free-soft); color: var(--free); }
+.pool .chip.lent { background: var(--lent-soft); color: var(--lent); }
+.pool .chip.warn { background: #fdf0dc; color: var(--warn); }
+.pool .scroll-x { overflow-x: auto; }
+
+/* join code */
+.pool .code { font-family: "Lucida Console", Consolas, monospace; font-size: 1.6rem; letter-spacing: 0.08em;
+  font-weight: 700; background: var(--paper); border-radius: 10px; padding: 12px 16px; }
+.pool ol.steps { list-style: decimal; margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; line-height: 1.45; font-size: 0.92rem; }
+
+/* job output */
+.pool pre.out { background: #15161a; color: #e6e6e6; border-radius: 10px; padding: 12px 14px; font-size: 0.8rem;
+  max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font-family: "Lucida Console", Consolas, monospace; }
+
+.pool .grid2 { display: grid; gap: 14px; grid-template-columns: 1fr; }
+@media (min-width: 720px) { .pool .grid2 { grid-template-columns: 1fr 1fr; } }
+.pool .grid4 { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+@media (min-width: 720px) { .pool .grid4 { grid-template-columns: repeat(4, 1fr); } }
+.pool .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.pool .between { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; justify-content: space-between; }
+.pool .list { display: flex; flex-direction: column; }
+.pool .list > .item { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.pool .list > .item:last-child { border-bottom: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .pool .seg .used { transition: width 600ms ease; }
+}
+
+.pool .nowrap { white-space: nowrap; }
+.pool .clip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pool .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* phones: each device becomes a card */
+@media (max-width: 760px) {
+  .pool table.devices thead { display: none; }
+  .pool table.devices, .pool table.devices tbody { display: block; }
+  .pool table.devices tr { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; padding: 14px 4px;
+    border-bottom: 1px solid var(--line); }
+  .pool table.devices td { display: block; padding: 0; border: none; min-width: 0 !important; white-space: normal; }
+  .pool table.devices td:first-child { grid-column: 1 / -1; }
+  .pool .clip { max-width: 100%; }
+}

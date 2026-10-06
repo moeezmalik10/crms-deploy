@@ -65,7 +65,7 @@ export default function History() {
 
   /* Filters */
   const pendingSessions = sessions.filter(
-    (s) => s.status === "pending" || s.status === "starting"
+    (s) => s.status === "pending" || s.status === "starting" || s.status === "allocated" || s.status === "queued"
   );
 
   const runningSessions = sessions.filter(

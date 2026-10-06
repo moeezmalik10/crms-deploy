@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from app import db, scheduler
 from app.models import TaskRequest, Node
-from app.allocation_engine import allocate_task, stop_task, release_node_tasks
+from app.allocation_engine import allocate_task, stop_task, release_node_tasks, log_event
 
 @scheduler.task('interval', id='process_queue', seconds=15) # Increased to 15s
 def process_queue():
@@ -61,6 +61,14 @@ def cleanup_system():
             # If there is no expiry_time (ML tasks), skip the time-out check entirely
             if t.task_type in ["ml_task", "ml_job_parent"] or t.expiry_time is None:
                 continue
+            if t.mode == "job":
+                # The agent stops a job at its time limit and reports; this is the safety net
+                if now > t.expiry_time + timedelta(minutes=3):
+                    t.status = "failed"
+                    t.completed_at = now
+                    t.message = "Failed: time limit reached and the device did not report back"
+                    log_event(t.id, t.assigned_node_id, "failed", t.message)
+                continue
             if now > t.expiry_time:
                 try:
                     stop_task(t.id, reason="Session Expired")
@@ -69,3 +77,44 @@ def cleanup_system():
                     db.session.rollback()  # Rollback any partial changes from stop_task
         
         db.session.commit()
+
+
+@scheduler.task('interval', id='pool_storage_upkeep', seconds=60)
+def pool_storage_upkeep():
+    """Keep pooled files healthy: add copies on newly available devices, drop server copies
+    once a download is over, and finish deletes of files whose devices are gone."""
+    from app.models import PoolBlob, PoolChunk, PoolFile, PoolReplica, DeviceEnrollment
+    from app.pool_routes import _storage_targets
+    from app.pool_agent_routes import _maybe_finish_replication
+    with scheduler.app.app_context():
+        try:
+            now = datetime.now(timezone.utc)
+            for f in PoolFile.query.filter(PoolFile.status != "deleting").all():
+                # A finished download: the server copies are no longer needed
+                req = f.download_requested_at
+                if req is not None:
+                    req = req if req.tzinfo else req.replace(tzinfo=timezone.utc)
+                    if now - req > timedelta(minutes=15):
+                        f.download_requested_at = None
+                # Missing copies: place them on devices that do not hold this file yet
+                for c in f.chunks:
+                    live = [r for r in c.replicas if r.status in ("pending", "stored")]
+                    missing = (f.replicas_wanted or 1) - len(live)
+                    if missing > 0 and c.tmp_blob_id:
+                        for n in _storage_targets(c.size, exclude={r.node_id for r in c.replicas})[:missing]:
+                            db.session.add(PoolReplica(chunk_id=c.id, node_id=n.id, status="pending"))
+                db.session.flush()
+                _maybe_finish_replication(f)
+            # Server copies of chunks that are no longer referenced
+            for c in PoolChunk.query.filter(PoolChunk.tmp_blob_id.isnot(None)).all():
+                if c.file.status == "deleting":
+                    PoolBlob.query.filter_by(id=c.tmp_blob_id).delete()
+                    c.tmp_blob_id = None
+            # Old join codes
+            DeviceEnrollment.query.filter(DeviceEnrollment.expires_at < now - timedelta(days=1)).delete()
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Pool storage upkeep error: {e}")
+        finally:
+            db.session.remove()

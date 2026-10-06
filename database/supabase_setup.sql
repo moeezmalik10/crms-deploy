@@ -164,3 +164,31 @@ SELECT 'student1', 'student1@uog.edu.pk',
 WHERE NOT EXISTS (SELECT 1 FROM public."user" WHERE lower(trim(email)) = 'student1@uog.edu.pk');
 
 SELECT id, username, email, role FROM public."user" ORDER BY id;
+
+-- ===== Resource pool (added Oct 2026) =====
+-- The backend also applies these automatically when it starts; running them here is optional.
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS owner_user_id INTEGER;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS device_key_hash VARCHAR(64);
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS lan_ip VARCHAR(64);
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS public_ip VARCHAR(64);
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS os_name VARCHAR(120);
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS cpu_model VARCHAR(160);
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS cpu_ghz DOUBLE PRECISION;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS total_storage_gb DOUBLE PRECISION;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS free_storage_gb DOUBLE PRECISION;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS share_cores DOUBLE PRECISION;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS share_ram_mb DOUBLE PRECISION;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS share_storage_gb DOUBLE PRECISION;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS paused BOOLEAN DEFAULT FALSE;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS allow_light_sandbox BOOLEAN DEFAULT FALSE;
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS sandbox_mode VARCHAR(20);
+ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS agent_version VARCHAR(20);
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS required_disk_mb DOUBLE PRECISION;
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_runtime VARCHAR(20);
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_entry VARCHAR(255);
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_args VARCHAR(500);
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS input_blob_id INTEGER;
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS result_blob_id INTEGER;
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS exit_code INTEGER;
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS output_tail TEXT;
+-- Tables device_enrollment, pool_blob, pool_file, pool_chunk, pool_replica are created by the backend at start-up.

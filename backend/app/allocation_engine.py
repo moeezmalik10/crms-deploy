@@ -15,6 +15,10 @@ TASK_PROFILES = {
     "ml_node":        {"cpu": 2, "ram": 4096} 
 }
 
+# Disk a sandboxed workspace may use on the device (MB)
+WORKSPACE_DISK_MB = 3072
+
+
 def log_event(task_id, node_id, status, message):
     #Log task execution event followed by db.session.commit() in caller.
     try:
@@ -51,9 +55,16 @@ def allocate_task(task_id):
         if task.assigned_node_id and task.status != "pending":
             return {"status": "already_allocated", "pc": task.assigned_pc}
 
-        profile = TASK_PROFILES.get(task.task_type)
-        if not profile:
-            return {"error": f"Task type '{task.task_type}' not found"}
+        if task.mode == "job":
+            # Compute jobs ask for exactly what they need (chosen by the student)
+            profile = {"cpu": task.required_cpu or 1, "ram": task.required_ram_mb or 1024,
+                       "disk": task.required_disk_mb or 500}
+        else:
+            profile = dict(TASK_PROFILES.get(task.task_type) or {})
+            if not profile:
+                return {"error": f"Task type '{task.task_type}' not found"}
+            if task.mode == "remote":
+                profile["disk"] = WORKSPACE_DISK_MB
 
         # Finding ELIGIBLE NODES — lock all candidates; peers wait instead of SKIP LOCKED → empty set
         timeout_limit = datetime.now(timezone.utc) - timedelta(seconds=45)
@@ -67,6 +78,14 @@ def allocate_task(task_id):
         # physically; remote (VM) sessions need a lab PC running the Python agent.
         if task.mode != "physical":
             nodes = [n for n in nodes if not (n.name or "").upper().startswith("WEB-")]
+        # The owner paused sharing
+        nodes = [n for n in nodes if not n.paused]
+        # Sandboxed work needs a device that can isolate it
+        if task.mode == "job":
+            nodes = [n for n in nodes if n.device_key_hash and (
+                n.sandbox_mode == "docker" or (n.sandbox_mode == "light" and n.allow_light_sandbox))]
+        elif task.mode == "remote":
+            nodes = [n for n in nodes if n.sandbox_mode == "docker"]
 
         if not nodes:
             task.status = "pending"
@@ -83,11 +102,12 @@ def allocate_task(task_id):
             TaskRequest.id != task_id
         ).all()
 
-        usage_map = {n_id: {"cpu": 0, "ram": 0, "phys": 0, "rem": 0} for n_id in node_ids}
+        usage_map = {n_id: {"cpu": 0, "ram": 0, "disk": 0, "phys": 0, "rem": 0} for n_id in node_ids}
         for t in active_tasks:
             usage = usage_map[t.assigned_node_id]
             usage["cpu"] += (t.required_cpu or 0)
             usage["ram"] += (t.required_ram_mb or 0)
+            usage["disk"] += (t.required_disk_mb or 0)
             if t.mode == "physical": usage["phys"] += 1
             if t.mode == "remote": usage["rem"] += 1
 
@@ -116,11 +136,15 @@ def allocate_task(task_id):
             stats = usage_map[node.id]
             task_count = stats["phys"] + stats["rem"]
             
-            # Rule A: one session per PC. Remote access (RustDesk) controls the PC's real desktop,
-            # so a PC is either reserved in person or used remotely, by one student at a time.
-            if task_count >= 1:
-                busy = [f"{t.id} ({t.mode})" for t in active_tasks if t.assigned_node_id == node.id]
+            # Rule A: a physical reservation takes the whole device. Sandboxed work (jobs and
+            # workspaces) only takes a slice, so several can share one device - but not while
+            # someone has the device reserved in person.
+            busy = [f"{t.id} ({t.mode})" for t in active_tasks if t.assigned_node_id == node.id]
+            if task.mode == "physical" and busy:
                 skipped.append(f"{node.name}: in use by task {', '.join(busy)}")
+                continue
+            if task.mode != "physical" and stats["phys"] >= 1:
+                skipped.append(f"{node.name}: reserved in person (physical session)")
                 continue
 
             # Rule B: Safety Buffer (20% of total)
@@ -134,13 +158,28 @@ def allocate_task(task_id):
             buffer_ram = 768
             buffer_cores = total_cores * 0.05
 
-            avail_cpu = max(0, total_cores - stats["cpu"] - buffer_cores)
-            avail_ram = max(0, total_ram - stats["ram"] - buffer_ram)
+            # The owner's share limits cap what this device lends
+            cap_cpu = total_cores - buffer_cores
+            cap_ram = total_ram - buffer_ram
+            if node.share_cores:
+                cap_cpu = min(cap_cpu, node.share_cores)
+            if node.share_ram_mb:
+                cap_ram = min(cap_ram, node.share_ram_mb)
+            avail_cpu = max(0, cap_cpu - stats["cpu"])
+            avail_ram = max(0, cap_ram - stats["ram"])
+
+            # Disk for sandboxed work: keep 5 GB free for the owner
+            need_disk = profile.get("disk") or 0
+            if need_disk:
+                free_disk = (node.free_storage_gb or 0) * 1024 - 5120 - stats["disk"]
+                if free_disk < need_disk:
+                    skipped.append(f"{node.name}: {max(0, free_disk):.0f} MB disk free to lend, needs {need_disk:.0f} MB")
+                    continue
 
             #validation
         
             if not (avail_cpu >= profile["cpu"] and avail_ram >= profile["ram"]):
-                skipped.append(f"{node.name}: capacity left {avail_cpu:.1f} cores / {avail_ram:.0f} MB, needs {profile['cpu']} / {profile['ram']} MB")
+                skipped.append(f"{node.name}: capacity left {avail_cpu:.1f} cores / {avail_ram:.0f} MB, needs {profile['cpu']:g} cores / {profile['ram']:.0f} MB")
             if avail_cpu >= profile["cpu"] and avail_ram >= profile["ram"]:
                 # Resource utilization
                 remaining_ram = avail_ram - profile["ram"]
@@ -190,6 +229,8 @@ def allocate_task(task_id):
         task.assigned_pc = best_node.name
         task.required_cpu = profile["cpu"]
         task.required_ram_mb = profile["ram"]
+        if profile.get("disk"):
+            task.required_disk_mb = profile["disk"]
         task.status = "allocated" # Waiting for Agent to start
         
         log_event(task.id, best_node.id, "allocated", f"Assigned to {best_node.name}")

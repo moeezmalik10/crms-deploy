@@ -20,6 +20,7 @@ def _nodes_meeting_ml_profile(nodes):
         n for n in nodes
         if (n.total_cores or 0) >= need_cpu and (n.total_ram_mb or 0) >= need_ram
         and not (n.name or "").upper().startswith("WEB-")
+        and not n.paused
     ]
 
 def _safe_task_message_json(msg):

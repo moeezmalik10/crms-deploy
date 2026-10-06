@@ -74,6 +74,16 @@ export default function AdminSideBar() {
                 >
                   Machines
                 </NavLink>
+                {/* ================================resource pool======== */}
+                <NavLink
+                 onClick={() => setIsOpen(false)}
+                  to={"pool"}
+                  className={({ isActive }) => ` p-3 rounded-lg tracking-wider text-start w-full transition-all duration-300
+                ${isActive ? " bg-[#b3b3b3ee] text-black font-bold" : "text-white bg-[#212121]"}
+                `}
+                >
+                  Resource Pool
+                </NavLink>
                 {/* ================================manage users======== */}
                 <NavLink
                  onClick={() => setIsOpen(false)}

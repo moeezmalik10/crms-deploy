@@ -261,7 +261,7 @@ export default function NewRequests() {
                   onChange={(e) => setAccessMode(e.target.value)}
                 />
 
-                {" "}Remote
+                {" "}Workspace (in browser)
 
               </label>
 

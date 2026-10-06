@@ -2,8 +2,8 @@ import { API_BASE } from "../../src/config";
 import { useEffect, useState } from "react";
 
 // Remote Link: shows how to reach the PC of the student's latest Remote session.
-// RustDesk sessions (link "rustdesk:<id>") show the RustDesk ID and a one-time password
-// that only works while the session runs; older VM sessions show their browser link.
+// Workspace sessions show the private https address and a one-time password of a sandboxed
+// VS Code that runs on a pool device; older VM sessions show their browser link.
 
 function CopyField({ label, value }) {
   const [copied, setCopied] = useState(false);
@@ -66,9 +66,9 @@ export default function StudentRemoteLink() {
 
   const statusText = {
     pending: "Waiting for a free PC",
-    allocated: "PC found - preparing remote access",
-    starting: "Preparing remote access...",
-    running: "Remote access ready",
+    allocated: "Device found - preparing your workspace",
+    starting: "Preparing your workspace...",
+    running: "Workspace ready",
     completed: "Session finished",
     failed: "Session failed",
   };
@@ -87,15 +87,14 @@ export default function StudentRemoteLink() {
     return (
       <div className="p-10 bg-gray-100 flex justify-center items-center w-full">
         <div className="bg-white p-6 rounded-xl shadow-lg text-center max-w-md">
-          <h4 className="text-lg font-semibold">No remote session yet</h4>
-          <p className="text-sm text-gray-600 mt-2">Make a New Request with access mode <b>Remote</b> to use a lab PC from your own laptop or phone.</p>
+          <h4 className="text-lg font-semibold">No workspace yet</h4>
+          <p className="text-sm text-gray-600 mt-2">Make a New Request with access mode <b>Workspace</b> to get a sandboxed slice of a pool device that you use from your browser.</p>
         </div>
       </div>
     );
   }
 
-  const isRustDesk = (session.link || "").startsWith("rustdesk:");
-  const rdId = isRustDesk ? session.link.slice("rustdesk:".length) : null;
+  const isWorkspace = session.vm_username === "workspace" || (session.link || "").includes("trycloudflare.com");
   const ends = session.expiry_time ? new Date(session.expiry_time).getTime() : null;
   const left = ends ? Math.max(0, Math.round((ends - now) / 1000)) : null;
 
@@ -116,27 +115,30 @@ export default function StudentRemoteLink() {
           )}
         </div>
 
-        {session.status === "running" && isRustDesk && (
+        {session.status === "running" && isWorkspace && (
           <>
-            <CopyField label="RustDesk ID of the lab PC" value={rdId} />
+            <CopyField label="Workspace address" value={session.link} />
             {session.vm_password ? (
-              <CopyField label="One-time password (works only during this session)" value={session.vm_password} />
+              <CopyField label="Password (works only during this session)" value={session.vm_password} />
             ) : (
               <p className="text-sm text-red-700">Log out and log in again to see the password.</p>
             )}
+            <a href={session.link} target="_blank" rel="noopener noreferrer"
+               className="px-4 py-2 bg-gray-900 hover:bg-black text-white rounded-md text-center font-semibold">
+              Open workspace
+            </a>
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-900">
-              <p className="font-semibold mb-2">How to connect</p>
-              <ol className="list-decimal ml-5 flex flex-col gap-1">
-                <li>Install RustDesk on your laptop or phone (free): <a className="underline" href="https://rustdesk.com/download" target="_blank" rel="noopener noreferrer">rustdesk.com/download</a></li>
-                <li>Open RustDesk, type the <b>ID</b> above in "Control Remote Desktop" and press <b>Connect</b>.</li>
-                <li>Enter the <b>one-time password</b>. You now control the lab PC.</li>
-                <li>When the time is up the connection is closed and the password stops working.</li>
-              </ol>
+              <p className="font-semibold mb-2">How it works</p>
+              <ul className="list-disc ml-5 flex flex-col gap-1">
+                <li>The workspace is VS Code in your browser, running in a sandbox on {session.assigned_pc}. It has C/C++ and Python.</li>
+                <li>It uses only the CPU, memory and disk slice given to this request. The PC owner keeps working normally and cannot see your files.</li>
+                <li>Download anything you want to keep before the time is up: the workspace and its files are deleted when the session ends.</li>
+              </ul>
             </div>
           </>
         )}
 
-        {session.status === "running" && !isRustDesk && (
+        {session.status === "running" && !isWorkspace && (
           <>
             <p className="text-sm"><b>Username:</b> {session.vm_username}</p>
             <p className="text-sm"><b>Password:</b> {session.vm_password || "(log in again to see it)"}</p>
@@ -154,7 +156,7 @@ export default function StudentRemoteLink() {
         )}
 
         {(session.status === "pending" || session.status === "allocated" || session.status === "starting") && (
-          <p className="text-sm text-gray-600">This page updates by itself. The ID and password appear here as soon as the lab PC is ready.</p>
+          <p className="text-sm text-gray-600">This page updates by itself. The address and password appear here as soon as the workspace is ready (the first one on a device can take a few minutes).</p>
         )}
       </div>
     </div>
