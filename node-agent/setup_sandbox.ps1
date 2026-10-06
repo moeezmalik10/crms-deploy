@@ -89,7 +89,7 @@ function Install-Sandbox {
   # 1. accounts ---------------------------------------------------------------
   Say "`n[1/7] Sandbox accounts" "Cyan"
   if (-not (Get-LocalGroup -Name $GroupName -ErrorAction SilentlyContinue)) {
-    New-LocalGroup -Name $GroupName -Description "CRMS pool jobs run as these low-privilege accounts" | Out-Null
+    New-LocalGroup -Name $GroupName -Description "CRMS pool jobs run as these accounts" | Out-Null
   }
   $gsid = (Get-LocalGroup -Name $GroupName).SID.Value
   if (-not (Test-Path $UserListKey)) { New-Item -Path $UserListKey -Force | Out-Null }
@@ -103,7 +103,7 @@ function Install-Sandbox {
       Enable-LocalUser -Name $name
     } else {
       New-LocalUser -Name $name -Password $sec -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires `
-        -Description "CRMS pool sandbox (runs pool jobs, no admin rights)" | Out-Null
+        -Description "CRMS pool sandbox account (no admin)" | Out-Null
     }
     Add-GroupMemberSafe -Name $GroupName -Member $name
     Add-GroupMemberSafe -Sid "S-1-5-32-545" -Member $name          # Users: may sign in locally, nothing more
