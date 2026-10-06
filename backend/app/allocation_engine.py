@@ -85,10 +85,10 @@ def allocate_task(task_id):
         no_node_reason = "No online nodes available. Queued."
         if task.mode == "job":
             nodes = [n for n in nodes if n.device_key_hash and (
-                n.sandbox_mode == "docker" or (n.sandbox_mode == "light" and n.allow_light_sandbox))]
+                n.sandbox_mode in ("docker", "isolated") or (n.sandbox_mode == "light" and n.allow_light_sandbox))]
             if online_count and not nodes:
-                no_node_reason = ("Queued: no online device can run jobs yet - a contributor needs Docker Desktop "
-                                  "running (or must allow jobs without Docker on Contribute Resources).")
+                no_node_reason = ("Queued: no online device can run jobs yet - a contributor needs the Windows sandbox "
+                                  "(setup_sandbox.bat, no extra software) or Docker Desktop running.")
         elif task.mode == "remote":
             nodes = [n for n in nodes if n.sandbox_mode == "docker"]
             if online_count and not nodes:

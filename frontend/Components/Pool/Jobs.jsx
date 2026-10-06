@@ -30,7 +30,7 @@ export default function Jobs() {
     try { setJobs(await api("/pool/jobs")); } catch (e) { setErr(e.message); }
     try {
       const d = await api("/pool/devices?everyone=1");
-      setReady(d.filter((x) => x.state === "online" && ["docker", "light"].includes(x.sandbox_mode)).length);
+      setReady(d.filter((x) => x.state === "online" && ["docker", "isolated", "light"].includes(x.sandbox_mode)).length);
     } catch { /* the list still works without this */ }
   }
   useEffect(() => { load(); const i = setInterval(load, 4000); return () => clearInterval(i); }, []);

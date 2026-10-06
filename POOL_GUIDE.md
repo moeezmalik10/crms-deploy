@@ -21,6 +21,10 @@ remotely through **sandboxes**. Nobody gets another student's desktop or files.
 * Agents only make **outgoing HTTPS** calls; a contributed PC opens no ports (the agent's local page now listens on 127.0.0.1 only).
 * Join codes are one-time and expire after 30 minutes; only hashes of codes and device keys are stored.
 * Job sandbox (Docker): no network, capped CPU/RAM/processes, read-only system, no Linux capabilities, its own folder only, deleted afterwards.
+* Windows sandbox (no Docker, nothing to install): set up once with `setup_sandbox.bat`. Each job runs as a
+  hidden, low-privilege Windows account inside a Windows Job Object: hard CPU cap, memory cap, max 64 processes,
+  below-normal priority, no access to the owner's windows/clipboard, no network (firewall rule), a disk quota,
+  and no access to the owner's user folder, the agent folder (device key) or folders/drives the owner blocked.
 * "Light sandbox" (no Docker) only if the owner ticks it: CPU, RAM, disk and time limits, but **not isolated** from the PC's files.
 * Storage parts are encrypted before they leave the server; contributors cannot read them.
 * Passwords for workspaces are shown only to the logged-in owner of the session.
@@ -40,8 +44,8 @@ remotely through **sandboxes**. Nobody gets another student's desktop or files.
 
 ## Set up a contributor PC (e.g. MOEEZ)
 
-1. Install **Docker Desktop** (free for education) and start it once. Without Docker the PC can still do Physical sessions and,
-   if the owner allows, light-sandbox jobs.
+1. For jobs, run **setup_sandbox.bat** once in the agent folder (see "Windows sandbox" below) - no extra software.
+   Install **Docker Desktop** only if the PC should also host browser workspaces.
 2. Log in as the student → **Contribute Resources** → set the limits → **Create join code**.
 3. Either download the agent from that page, or update your existing `cloud-agent` folder with the new
    `agent.py`, `pool_runtime.py` and `start_agent.bat`. Run `setup_agent.bat` once if it is a new folder.
@@ -97,3 +101,28 @@ with open("output/result.csv", "w", newline="") as f:
     for r in rows:
         w.writerow([r["n"], int(r["n"]) ** 2])
 ```
+
+## Windows sandbox (jobs without Docker)
+
+Uses only what is built into Windows 10/11 (Home works too):
+
+| Protection | Windows feature |
+|---|---|
+| Job runs as `crms_sb1`..`crms_sb4`, not as you | separate local accounts (standard users, hidden from the sign-in screen, random passwords nobody sees) |
+| Cannot open your files | NTFS permissions: your user folder is private; setup also blocks the agent folder, the Public folder and, if you agree, other drives and folders on C:\ |
+| CPU, memory, processes, priority | Job Object: hard CPU cap, job memory limit, max 64 processes, below-normal priority, everything killed when the job ends |
+| Cannot touch your windows or clipboard | Job Object UI restrictions; its console window is hidden |
+| No internet / LAN | Windows Firewall rule for the sandbox accounts |
+| Cannot fill your disk | NTFS disk quota per sandbox account (10 GB) plus the per-job disk limit |
+| Each job sees only its own folder | per-job folder under C:\ProgramData\CRMS\sandbox opened to one account only |
+
+Setup on a contributor PC:
+
+1. Install Python from **python.org** (not the Microsoft Store), run `setup_agent.bat` (once).
+2. Run **setup_sandbox.bat**, allow administrator permission, answer the questions (Y = block the sandbox from
+   that drive/folder). It then runs the self-test.
+3. Every line of the self-test must say PASS. Run `test_sandbox.bat` again any time.
+4. Restart the agent: the window shows `Sandbox : isolated`; Admin -> Resource Pool shows **Windows sandbox**.
+
+`remove_sandbox.bat` removes the accounts, permissions, firewall rule and quotas again (stop the agent first).
+Browser workspaces still need Docker Desktop.

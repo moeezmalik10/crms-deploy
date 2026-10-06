@@ -93,8 +93,10 @@ export default function Contribute() {
                 </div>
                 <ol className="steps">
                   <li><a className="btn ghost sm" href="/crms-agent.zip" download>Download the agent</a> and unzip it, for example to <b>C:\CRMS-agent</b>.</li>
-                  <li>Install <b>Python 3.12</b> (tick "Add to PATH") and, for full isolation, <b>Docker Desktop</b>.</li>
-                  <li>Double-click <b>setup_agent.bat</b> once.</li>
+                  <li>Install <b>Python 3.12</b> from python.org (tick "Add to PATH").</li>
+                  <li>Double-click <b>setup_agent.bat</b> once, then <b>setup_sandbox.bat</b> once (it asks for administrator
+                    permission, creates hidden low-privilege accounts that run the jobs, and tests them). Docker Desktop is
+                    optional - it adds browser workspaces.</li>
                   <li>Double-click <b>start_agent.bat</b>, then paste the server address and the join code when it asks.</li>
                   <li>Your PC appears under My devices within a minute.</li>
                 </ol>
@@ -136,7 +138,10 @@ function MyDevice({ d, onChange, onError }) {
             {d.pool_storage_used_mb > 0 && <span className="chip" style={{ marginLeft: 8 }}>{mb(d.pool_storage_used_mb)} of files kept</span>}
           </div>
           <div className="small muted" style={{ marginTop: 4 }}>
-            Sandbox: {d.sandbox_mode === "docker" ? "Docker (full isolation)" : d.sandbox_mode === "light" ? "light (no Docker)" : "none - install Docker Desktop to run jobs and workspaces"}
+            Sandbox: {d.sandbox_mode === "docker" ? "Docker (jobs and workspaces)"
+              : d.sandbox_mode === "isolated" ? "Windows sandbox (jobs run as a separate low-privilege account)"
+              : d.sandbox_mode === "light" ? "light (no isolation)"
+              : "none - run setup_sandbox.bat in the agent folder to run jobs (Docker Desktop also adds workspaces)"}
           </div>
         </div>
         <div className="row">

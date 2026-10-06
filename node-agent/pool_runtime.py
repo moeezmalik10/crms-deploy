@@ -5,7 +5,9 @@ desktop. Everything a requester runs is placed in a sandbox:
 
 * Compute jobs  - an isolated Docker container (no network, capped CPU/RAM/processes,
                   read-only system, only its own work folder) that is deleted afterwards.
-                  "Light sandbox" (no Docker) is possible only if the owner allows it.
+                  Without Docker: the Windows sandbox (win_sandbox.py - a separate low-privilege
+                  Windows account inside a Job Object, set up once with setup_sandbox.bat), or the
+                  "light sandbox" if the owner allows it.
 * Workspaces    - a VS Code-in-the-browser container with its own CPU/RAM limit, reached
                   through a private https link and password; deleted when the time is up.
 * Storage       - encrypted chunks kept in a folder on this PC; the owner cannot read them.
@@ -30,6 +32,8 @@ import zipfile
 import psutil
 import requests
 
+import win_sandbox
+
 AGENT_VERSION = "2.0"
 IS_WINDOWS = os.name == "nt"
 NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
@@ -51,7 +55,7 @@ NODE_NAME = socket.gethostname()
 API = requests.Session()
 KEYED = False
 SETTINGS = {"paused": False, "share_storage_gb": None, "allow_light_sandbox": False}
-SANDBOX = "none"            # docker / light / none
+SANDBOX = "none"            # docker / isolated (Windows sandbox) / light / none
 _lock = threading.Lock()
 _workspaces = {}            # task_id -> {"container", "tunnel", "dir", "disk_mb"}
 _jobs_cancel = {}           # task_id -> threading.Event
@@ -206,6 +210,8 @@ def detect_sandbox():
     global SANDBOX
     if docker_ok():
         SANDBOX = "docker"
+    elif win_sandbox.available():
+        SANDBOX = "isolated"
     elif SETTINGS.get("allow_light_sandbox"):
         SANDBOX = "light"
     else:
@@ -324,8 +330,10 @@ def run_job(cmd):
     task_id = cmd["task_id"]
     cancel = threading.Event()
     _jobs_cancel[task_id] = cancel
-    work = os.path.join(WORK_DIR, f"job_{task_id}")
-    shutil.rmtree(work, ignore_errors=True)
+    mode = SANDBOX
+    account = None            # Windows sandbox account running this job
+    work = os.path.join(win_sandbox.work_root() if mode == "isolated" else WORK_DIR, f"job_{task_id}")
+    win_sandbox.rmtree(work)
     os.makedirs(os.path.join(work, "output"), exist_ok=True)
     if not IS_WINDOWS:   # the sandbox user (uid 1000) must be able to write its own folder
         os.chmod(work, 0o777); os.chmod(os.path.join(work, "output"), 0o777)
@@ -334,10 +342,14 @@ def run_job(cmd):
     disk_mb, minutes = float(cmd.get("disk_mb") or 500), float(cmd.get("max_minutes") or 10)
     args = cmd.get("args") or ""
     part, parts = int(cmd.get("part") or 1), int(cmd.get("parts") or 1)
-    mode = SANDBOX
     try:
         if mode == "none":
-            return report_error(task_id, "this device has no sandbox (install Docker Desktop)")
+            return report_error(task_id, "this device has no sandbox (install Docker Desktop or run setup_sandbox.bat)")
+        if mode == "isolated":
+            account = win_sandbox.acquire()
+            if not account:
+                return report_error(task_id, "all sandbox accounts on this device are busy")
+            win_sandbox.prepare_dir(work, account[0])   # before any file is added, so all inherit it
         r = _get(cmd["input_path"], timeout=120)
         if r.status_code != 200:
             return report_error(task_id, f"could not download the job files (HTTP {r.status_code})")
@@ -354,6 +366,10 @@ def run_job(cmd):
 
         if mode == "docker":
             code, out, reason = _run_job_docker(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel, part, parts)
+        elif mode == "isolated":
+            code, out, reason = win_sandbox.run_job(
+                work, runtime, entry, args, cores, ram_mb, part, parts, account,
+                lambda alive, kill: _watch(task_id, alive, kill, work, disk_mb, minutes, cancel))
         else:
             code, out, reason = _run_job_light(task_id, work, runtime, entry, args, cores, ram_mb, disk_mb, minutes, cancel, part, parts)
 
@@ -377,7 +393,8 @@ def run_job(cmd):
         report_error(task_id, f"job failed on the device: {e}")
     finally:
         _jobs_cancel.pop(task_id, None)
-        shutil.rmtree(work, ignore_errors=True)
+        win_sandbox.release(account)
+        win_sandbox.rmtree(work)
 
 
 def _job_command(runtime, entry, args):
