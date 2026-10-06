@@ -15,4 +15,5 @@ node-agent/pool_workspaces/
 node-agent/device_key.txt
 node-agent/node_name.txt
 node-agent/join_code.txt
+node-agent/sandbox_users.json
 node-agent/cloudflared*

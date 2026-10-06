@@ -144,6 +144,7 @@ function Row({ d, admin, act }) {
           {d.share_storage_gb ? `${num(d.share_storage_gb)} GB storage` : "no storage"}</div>
         <div className="row" style={{ marginTop: 6, gap: 6 }}>
           {d.sandbox_mode === "docker" && <span className="chip good">Docker sandbox</span>}
+          {d.sandbox_mode === "isolated" && <span className="chip good">Windows sandbox</span>}
           {d.sandbox_mode === "light" && <span className="chip warn">Light sandbox</span>}
           {(!d.sandbox_mode || d.sandbox_mode === "none") && <span className="chip">Sessions only</span>}
           {d.lent?.tasks ? <span className="chip lent">lent {num(d.lent.cores)} cores, {mb(d.lent.ram_mb)}</span> : null}

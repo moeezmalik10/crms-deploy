@@ -740,7 +740,9 @@ if __name__ == "__main__":
     print(f"Heartbeat    : every {HEARTBEAT_INTERVAL} seconds")
     print(f"Node name    : {NODE_NAME}")
     print(f"Device key   : {'yes - verified pool device' if pool.KEYED else 'NO (lab PC mode) - join from the website to contribute'}")
-    print(f"Sandbox      : {pool.detect_sandbox()}  (docker = full isolation; light = owner allowed jobs without Docker)")
+    print(f"Sandbox      : {pool.detect_sandbox()}  (docker = container; isolated = Windows sandbox account + job limits; light = owner allowed, not isolated)")
+    if pool.SANDBOX not in ("docker", "isolated") and pool.IS_WINDOWS:
+        print(f"Win sandbox  : {pool.win_sandbox.LAST_ERROR}")
     print(f"Pool storage : {pool.STORAGE_DIR}")
     print("=" * 40)
 
