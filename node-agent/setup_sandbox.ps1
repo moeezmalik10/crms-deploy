@@ -31,6 +31,7 @@ $Prefix      = "crms_sb"
 $WorkRoot    = Join-Path $env:ProgramData "CRMS\sandbox"
 $ConfigFile  = Join-Path $AgentDir "sandbox_users.json"
 $RulePrefix  = "CRMS-Sandbox"
+$LogFile     = Join-Path $AgentDir "sandbox_setup.log"
 $UserListKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
 
 function Say([string]$Text, [string]$Color = "Gray") { Write-Host $Text -ForegroundColor $Color }
@@ -297,33 +298,52 @@ if (-not $Elevated) {
     if ($g) { $GppPath = $g.Source }
   }
   $AgentSid = $AgentSid.Trim()
-  $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Elevated",
-               "-AgentSid", $AgentSid, "-Accounts", "$Accounts", "-QuotaGB", "$QuotaGB")
-  if ($PythonDir) { $argList += @("-PythonDir", "`"$PythonDir`"") }
-  if ($GppPath)   { $argList += @("-GppPath", "`"$GppPath`"") }
-  if ($Remove)    { $argList += "-Remove" }
+  # Files downloaded from the internet are marked as such; clear that so Windows lets them run
+  Get-ChildItem -LiteralPath $AgentDir -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in ".ps1", ".bat", ".py" } | Unblock-File -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $LogFile) { Remove-Item -LiteralPath $LogFile -Force -ErrorAction SilentlyContinue }
+  $started = Get-Date
+
+  # The administrator part runs in its own window through cmd.exe, so that even if PowerShell
+  # fails before the script starts, the window stays open ("pause") and the message can be read.
+  $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  $line = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Elevated -AgentSid $AgentSid -Accounts $Accounts -QuotaGB $QuotaGB"
+  if ($PythonDir) { $line += " -PythonDir `"$PythonDir`"" }
+  if ($GppPath)   { $line += " -GppPath `"$GppPath`"" }
+  if ($Remove)    { $line += " -Remove" }
   Say "Windows will ask for administrator permission; the setup continues in a new window..." "Cyan"
   try {
-    $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $argList
+    Start-Process -FilePath "cmd.exe" -Verb RunAs -Wait -ArgumentList "/c `"$line || pause`""
   } catch {
     Say "Administrator permission was not given - nothing was changed." "Red"; exit 1
   }
-  if ($p.ExitCode -ne 0) { Say "The administrator part stopped with an error (see its window). Nothing to test." "Red"; exit 1 }
+  $finished = if ($Remove) { -not (Test-Path -LiteralPath $ConfigFile) }
+              else { (Test-Path -LiteralPath $ConfigFile) -and ((Get-Item -LiteralPath $ConfigFile).LastWriteTime -ge $started) }
+  if (-not $finished) {
+    Say "`nThe administrator part did not finish." "Red"
+    if (Test-Path -LiteralPath $LogFile) {
+      Say "Last lines of $LogFile :" "Yellow"
+      Get-Content -LiteralPath $LogFile -Tail 25 | ForEach-Object { Say "   $_" }
+    } else {
+      Say "It stopped before it could write $LogFile - send a photo of the administrator window." "Yellow"
+    }
+    exit 1
+  }
   if ($Remove) { Say "The Windows sandbox was removed. Restart the agent." "Green"; exit 0 }
   Say "`nTesting the sandbox (about 30 seconds)..." "Cyan"
   & $py (Join-Path $AgentDir "win_sandbox.py") --test
   exit $LASTEXITCODE
 }
 
-$code = 0
+try { Start-Transcript -LiteralPath $LogFile -Force | Out-Null } catch { }
 try {
   if ($Remove) { Remove-Sandbox } else { Install-Sandbox }
 } catch {
   Say ""
   Say ("ERROR: " + $_.Exception.Message) "Red"
   Say $_.InvocationInfo.PositionMessage "DarkGray"
-  $code = 1
 }
+try { Stop-Transcript | Out-Null } catch { }
 Say ""
 Read-Host "Press Enter to close this window" | Out-Null
-exit $code
+exit 0     # the first window checks the result itself
