@@ -22,6 +22,26 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@auth_bp.route("/health/ids", methods=["GET"])
+def health_ids():
+    """Shows whether IDS_BASE is configured on this service and whether that address
+    actually answers - never shows a secret. See ids/app.py's /health/supabase for the
+    same idea on the IDS side."""
+    ids_base = current_app.config.get("IDS_BASE")
+    if not ids_base:
+        return jsonify({"result": "FAIL: IDS_BASE is empty on crms-backend - logins are not screened"}), 200
+    try:
+        r = requests.get(f"{ids_base}/health", timeout=4)
+        return jsonify({
+            "ids_base": ids_base,
+            "ids_health_status": r.status_code,
+            "result": "OK: crms-backend can reach the IDS" if r.status_code == 200
+                       else f"FAIL: IDS answered HTTP {r.status_code}",
+        })
+    except Exception as e:
+        return jsonify({"ids_base": ids_base, "result": f"FAIL: cannot reach {ids_base} ({type(e).__name__}: {e})"})
+
+
 def _ids_block_reason(email, password):
     """Ask the IDS service to screen a login server-side, so the check can't be
     skipped by calling this API directly instead of going through the website.
