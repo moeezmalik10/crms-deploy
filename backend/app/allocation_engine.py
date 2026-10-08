@@ -302,4 +302,13 @@ def release_node_tasks(node, reason):
             t.message = f"Failed: {reason} ({node.name})"
             log_event(t.id, node.id, "failed", t.message)
             failed += 1
+            # A federated-learning round can never finish without this chunk, so the
+            # parent job must not be left waiting forever for a "completed" that will
+            # never come - fail it now instead of hanging in "running" indefinitely.
+            if is_ml and t.parent_task_id:
+                parent = TaskRequest.query.get(t.parent_task_id)
+                if parent and parent.status not in ("completed", "failed"):
+                    parent.status = "failed"
+                    parent.message = f"Failed: child task {t.id} lost its device ({reason})"
+                    log_event(parent.id, None, "failed", parent.message)
     return requeued, failed

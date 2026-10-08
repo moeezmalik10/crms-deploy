@@ -12,6 +12,10 @@ class Config:
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
     if not JWT_SECRET_KEY:
         raise ValueError("JWT_SECRET_KEY environment variable is not set")
+    # The IDS service. If set, the backend itself screens logins through it, so the
+    # check can't be skipped by calling this API directly instead of going through
+    # the website. Login still works (without IDS screening) if this is left unset.
+    IDS_BASE = (os.environ.get("IDS_BASE") or "").strip().rstrip("/")
     # Stay logged in for a working day (the library default is only 15 minutes)
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=8)
 

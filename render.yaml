@@ -24,6 +24,8 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
+      - key: IDS_BASE
+        sync: false
 
   - type: web
     name: crms-ids
@@ -40,4 +42,6 @@ services:
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
+        sync: false
+      - key: JWT_SECRET_KEY
         sync: false

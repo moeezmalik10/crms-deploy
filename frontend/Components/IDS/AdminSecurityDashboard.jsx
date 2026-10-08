@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { supabase } from "../../src/supabaseClient";
+import { API_BASE } from "../../src/config";
 import {
   BarChart,
   Bar,
@@ -32,15 +32,18 @@ export default function AdminSecurityDashboard() {
   }, []);
 
   const fetchLogs = async () => {
-    const { data, error } = await supabase
-      .from("intrusion_logs")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      console.log("Supabase Error:", error.message);
-    } else {
-      setLogs(data);
+    try {
+      const res = await fetch(`${API_BASE}/admin/intrusion-logs`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }
+      });
+      if (!res.ok) {
+        console.log("Error fetching intrusion logs: HTTP", res.status);
+        return;
+      }
+      const data = await res.json();
+      setLogs(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.log("Error fetching intrusion logs:", error);
     }
   };
 

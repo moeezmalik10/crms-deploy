@@ -50,3 +50,14 @@ def run_startup_migrations(db):
         # The new tables hold private data; the browser (anon key) must never read them.
         for table in ("device_enrollment", "pool_blob", "pool_file", "pool_chunk", "pool_replica"):
             conn.execute(text(f'ALTER TABLE IF EXISTS public."{table}" ENABLE ROW LEVEL SECURITY'))
+    # Two nodes must never share a device key (NULL is fine - unkeyed/legacy nodes have no key).
+    # A separate transaction: if duplicate keys already exist from before this was added, log it
+    # instead of blocking the app from starting - app.py's device-key lookups already return
+    # the first match either way, so this only makes the existing invariant enforced, not new.
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS node_device_key_hash_key ON public."node" (device_key_hash)'
+            ))
+    except Exception as e:
+        print(f"WARNING: could not enforce unique device keys (likely duplicates already exist): {e}")

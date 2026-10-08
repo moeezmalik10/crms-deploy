@@ -3,9 +3,21 @@ from datetime import datetime, timezone, timedelta
 from app import db
 from app.models import User, TaskRequest, MLResult
 from app.allocation_engine import allocate_task, stop_task, log_event
-from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
+from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 
 student_bp = Blueprint("student", __name__)
+
+
+def _current_user():
+    """The user the JWT was issued to - never trust a client-supplied user id instead."""
+    ident = str(get_jwt_identity())
+    return User.query.get(int(ident)) if ident.isdigit() else User.query.filter_by(username=ident).first()
+
+
+def _owns_task(task, user):
+    role = (get_jwt() or {}).get("role")
+    return bool(user) and (task.user_id == user.id or role == "admin")
+
 
 # =====================
 # TASK MANAGEMENT (Student & Internal)
@@ -16,9 +28,12 @@ student_bp = Blueprint("student", __name__)
 def request_task_frontend():
     # Frontend route for task submission.
     # Added Guard Check to prevent multiple active tasks.
-    
+
     data = request.get_json()
-    user_id = data.get("user_id")
+    current_user = _current_user()
+    if not current_user:
+        return jsonify({"error": "Unauthorized"}), 401
+    user_id = current_user.id
 
     # GUARD CHECK: Ensure User ID cannot have more than one non-terminal task
     active_task = TaskRequest.query.filter(
@@ -56,6 +71,9 @@ def request_task_frontend():
 @jwt_required()
 def manual_allocate(task_id):
     #Internal/Original allocation route - Kept for backward compatibility
+    task = TaskRequest.query.get_or_404(task_id)
+    if not _owns_task(task, _current_user()):
+        return jsonify({"error": "Unauthorized"}), 403
     result = allocate_task(task_id)
     return jsonify(result)
 
@@ -63,14 +81,22 @@ def manual_allocate(task_id):
 @jwt_required()
 def manual_stop(task_id):
     #Internal/Original stop route - Kept for backward compatibility
+    task = TaskRequest.query.get_or_404(task_id)
+    if not _owns_task(task, _current_user()):
+        return jsonify({"error": "Unauthorized"}), 403
     result = stop_task(task_id, reason="Manual Stop")
     return jsonify(result)
 
 @student_bp.route("/tasks/my/<username>", methods=["GET"])
+@jwt_required()
 def get_my_sessions(username):
-    #    Returns sessions and performs real-time cleanup.
-    
+    # Returns sessions and performs real-time cleanup. A student may only list their own
+    # sessions; an admin may look up anyone's.
     user = User.query.filter_by(username=username).first_or_404()
+    current_user = _current_user()
+    role = (get_jwt() or {}).get("role")
+    if not current_user or (current_user.id != user.id and role != "admin"):
+        return jsonify({"error": "Unauthorized"}), 403
     now = datetime.now(timezone.utc)
     
     # Cleanup expired 'running' tasks
@@ -98,13 +124,8 @@ def get_my_sessions(username):
 
     tasks = TaskRequest.query.filter_by(user_id=user.id).order_by(TaskRequest.created_at.desc()).all()
 
-    # Remote-access passwords are only shown to the logged-in owner of the session
-    owner = False
-    try:
-        verify_jwt_in_request(optional=True)
-        owner = str(get_jwt_identity() or "") == str(user.id)
-    except Exception:
-        owner = False
+    # Remote-access passwords are only shown to the logged-in owner of the session (not even an admin)
+    owner = current_user.id == user.id
     
     return jsonify([{
         "id": t.id,

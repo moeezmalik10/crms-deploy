@@ -83,10 +83,25 @@ def agent_auth(name_param=None):
 
 
 def task_belongs_to_caller(task):
-    """Keyed agents may only report on tasks assigned to them."""
-    if getattr(g, "node", None) is None:
-        return True  # legacy agent (allowed by agent_auth)
-    return task.assigned_node_id == g.node.id
+    """Only the agent the task is actually assigned to may report on it.
+
+    Keyed agents are identified by their device key. Legacy (keyless) agents
+    carry no such proof, so they must name the PC they claim to be (field
+    "pc_name" in the JSON body) and that name must match task.assigned_pc -
+    and must not belong to a device that has since taken a device key,
+    otherwise a keyed device could be impersonated simply by omitting the key.
+    """
+    node = getattr(g, "node", None)
+    if node is not None:
+        return task.assigned_node_id == node.id
+    if not LEGACY_AGENTS_ALLOWED:
+        return False
+    data = request.get_json(silent=True) or {}
+    claimed = (data.get("pc_name") or request.args.get("pc_name") or "").strip()
+    if not claimed or not task.assigned_pc or claimed != task.assigned_pc:
+        return False
+    named = Node.query.filter_by(name=claimed).first()
+    return not (named and named.device_key_hash)
 
 
 # ---------------- encryption ----------------

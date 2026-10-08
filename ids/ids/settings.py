@@ -33,6 +33,8 @@ def _clean_url(value):
 
 SUPABASE_URL = _clean_url(os.environ.get("SUPABASE_URL"))
 SUPABASE_KEY = _clean(os.environ.get("SUPABASE_KEY"))
+# Shared with the backend's JWT_SECRET_KEY so the IDS can tell an admin's token is real.
+JWT_SECRET_KEY = _clean(os.environ.get("JWT_SECRET_KEY"))
 
 HEADERS = {"apikey": SUPABASE_KEY, "Content-Type": "application/json"}
 # Legacy keys (eyJ...) are JWTs and also go in Authorization. New keys (sb_secret_...) must not.

@@ -1,15 +1,16 @@
-from flask import Blueprint, request, jsonify
-from datetime import datetime, timedelta    
+from flask import Blueprint, request, jsonify, current_app
+from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 from app import db
 from app.models import User, Node, NodeMetrics, TaskRequest
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity # NEW
+import requests
 
 
 auth_bp = Blueprint("auth", __name__)
 
 # =====================
-# BASIC & HEALTH 
+# BASIC & HEALTH
 # =====================
 
 @auth_bp.route("/")
@@ -20,16 +21,51 @@ def index():
 def health():
     return jsonify({"status": "ok"})
 
+
+def _ids_block_reason(email, password):
+    """Ask the IDS service to screen a login server-side, so the check can't be
+    skipped by calling this API directly instead of going through the website.
+    Returns a reason string to block on, or None to let the login proceed
+    (including when the IDS is unreachable - it's defense in depth, not the
+    only gate: the password is still checked normally either way)."""
+    ids_base = current_app.config.get("IDS_BASE")
+    if not ids_base:
+        return None
+    try:
+        resp = requests.post(
+            f"{ids_base}/detect",
+            json={"email": email, "password": password},
+            headers={
+                "X-Internal-Secret": current_app.config["JWT_SECRET_KEY"],
+                "X-Original-IP": request.remote_addr or "",
+            },
+            timeout=4,
+        )
+        prediction = (resp.json() or {}).get("prediction", "BENIGN")
+    except Exception:
+        return None
+    if prediction and prediction != "BENIGN":
+        return prediction
+    return None
+
+
 # =====================
-# AUTH ROUTES 
+# AUTH ROUTES
 # =====================
 
 @auth_bp.route("/auth/login", methods=["POST"])
 def login():
     data = request.get_json()
-    user = User.query.filter_by(email=data.get("email")).first()
+    email = data.get("email")
+    password = data.get("password")
 
-    if not user or not check_password_hash(user.password, data.get("password")):
+    block_reason = _ids_block_reason(email, password)
+    if block_reason:
+        return jsonify({"error": f"Suspicious activity detected: {block_reason}"}), 403
+
+    user = User.query.filter_by(email=email).first()
+
+    if not user or not check_password_hash(user.password, password):
         return jsonify({"error": "invalid credentials"}), 401
 
     # Create an access token for the user

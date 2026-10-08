@@ -53,7 +53,20 @@ def spawn_distributed_ml(user_id, dataset_url, model_type, validation_type, spli
     timeout = datetime.now(timezone.utc) - timedelta(seconds=45)
     candidates = Node.query.filter(Node.status == 'online', Node.last_heartbeat > timeout).all()
     nodes = _nodes_meeting_ml_profile(candidates)
-    
+
+    # Never place an ML chunk on a node that is already running a physical/remote student
+    # session - allocate_task() enforces "one physical session per PC at a time" for those
+    # modes, and this must not silently collide with it just because it takes a different path.
+    if nodes:
+        busy_node_ids = {
+            t.assigned_node_id for t in TaskRequest.query.filter(
+                TaskRequest.assigned_node_id.in_([n.id for n in nodes]),
+                TaskRequest.status.in_(["running", "starting", "allocated"]),
+                TaskRequest.mode.in_(["physical", "remote"]),
+            ).all()
+        }
+        nodes = [n for n in nodes if n.id not in busy_node_ids]
+
     if not nodes:
         return {"error": "No lab PCs are currently online with enough CPU/RAM for ML workers."}
 
@@ -161,10 +174,20 @@ def aggregate_ml_results(parent_task_id):
         return None
 
     children = TaskRequest.query.filter_by(parent_task_id=parent_task_id).all()
-    
+
+    # A child that failed (e.g. its device left the pool) will never become "completed" -
+    # fail the whole job now instead of waiting forever for a result that can't arrive.
+    failed_children = [c for c in children if c.status == "failed"]
+    if failed_children and parent_job.status not in ("completed", "failed"):
+        parent_job.status = "failed"
+        parent_job.message = f"Failed: child task {failed_children[0].id} did not complete"
+        log_event(parent_job.id, None, "failed", parent_job.message)
+        db.session.commit()
+        return None
+
     # Ensure all nodes have finished the current round
     if not children or any(c.status != 'completed' for c in children):
-        return None 
+        return None
 
     # Retrieve current round from parent metadata
     parent_meta = _safe_task_message_json(parent_job.message)

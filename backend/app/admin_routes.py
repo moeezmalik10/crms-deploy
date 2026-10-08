@@ -1,3 +1,5 @@
+import os
+import secrets
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone, timedelta
 from werkzeug.security import generate_password_hash
@@ -9,6 +11,39 @@ from sqlalchemy.exc import IntegrityError
 from flask_jwt_extended import jwt_required, get_jwt
 
 admin_bp = Blueprint("admin", __name__)
+
+_SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
+_SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
+
+
+@admin_bp.route("/admin/intrusion-logs", methods=["GET"])
+@jwt_required()
+def get_intrusion_logs():
+    """Proxies intrusion_logs through the backend's own admin check, using the
+    service_role key server-side - the browser's anon key is never given direct
+    read access to this table (it holds attacker/victim emails and IPs)."""
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"error": "Admin access required"}), 403
+
+    if not (_SUPABASE_URL and _SUPABASE_KEY):
+        return jsonify({"error": "Supabase is not configured on this server"}), 502
+
+    import requests
+    headers = {"apikey": _SUPABASE_KEY}
+    if _SUPABASE_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {_SUPABASE_KEY}"
+    try:
+        r = requests.get(
+            f"{_SUPABASE_URL}/rest/v1/intrusion_logs",
+            headers=headers,
+            params={"select": "*", "order": "created_at.desc", "limit": "500"},
+            timeout=20,
+        )
+        r.raise_for_status()
+    except Exception as e:
+        return jsonify({"error": f"could not read intrusion logs: {e}"}), 502
+    return jsonify(r.json())
 
 # =====================
 # ADMIN – USERS
@@ -81,11 +116,13 @@ def reset_password(user_id):
     if claims.get("role") != "admin":
         return jsonify({"error": "Admin access required"}), 403
     
-    # Password Reset functionality
+    # Password Reset functionality - a fresh random password every time, shown once to the
+    # admin here, never a predictable fixed value every account would otherwise share.
     user = User.query.get_or_404(user_id)
-    user.password = generate_password_hash("123456")
+    new_password = secrets.token_urlsafe(9)
+    user.password = generate_password_hash(new_password)
     db.session.commit()
-    return jsonify({"message": "Password reset to default 123456"})
+    return jsonify({"message": "Password reset", "new_password": new_password})
 
 @admin_bp.route("/admin/users/<int:user_id>", methods=["DELETE"])
 @jwt_required()

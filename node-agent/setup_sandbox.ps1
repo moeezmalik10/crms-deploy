@@ -108,7 +108,11 @@ function Install-Sandbox {
     }
     Add-GroupMemberSafe -Name $GroupName -Member $name
     Add-GroupMemberSafe -Sid "S-1-5-32-545" -Member $name          # Users: may sign in locally, nothing more
-    try { Remove-LocalGroupMember -SID "S-1-5-32-544" -Member $name -ErrorAction Stop } catch { }   # never an administrator
+    # never an administrator - check membership first so there is nothing to swallow; if a
+    # removal that IS needed fails, that is a real problem and must stop setup, not be hidden
+    if (Get-LocalGroupMember -SID "S-1-5-32-544" -Member $name -ErrorAction SilentlyContinue) {
+      Remove-LocalGroupMember -SID "S-1-5-32-544" -Member $name -ErrorAction Stop
+    }
     New-ItemProperty -Path $UserListKey -Name $name -Value 0 -PropertyType DWord -Force | Out-Null  # hidden from the sign-in screen
     $blob = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($pw),
               [Text.Encoding]::UTF8.GetBytes("crms-sandbox"), [Security.Cryptography.DataProtectionScope]::LocalMachine)
@@ -143,10 +147,11 @@ function Install-Sandbox {
   # 4. keep the sandbox out of the owner's files --------------------------------
   Say "`n[4/7] Keep the sandbox out of your files" "Cyan"
   $protected = @()
-  if (Run-Native "icacls.exe" @($AgentDir, "/deny", "*${gsid}:(OI)(CI)F", "/Q")) {
-    $protected += $AgentDir
-    Say "   blocked: $AgentDir (agent, device key, sandbox passwords)"
+  if (-not (Run-Native "icacls.exe" @($AgentDir, "/deny", "*${gsid}:(OI)(CI)F", "/Q"))) {
+    throw "could not block the sandbox from $AgentDir (device key, sandbox passwords) - setup stopped, nothing is marked configured"
   }
+  $protected += $AgentDir
+  Say "   blocked: $AgentDir (agent, device key, sandbox passwords)"
   Say "   your user folder (Desktop, Documents, Downloads, ...) is private to you already"
   if ($env:PUBLIC -and (Test-Path -LiteralPath $env:PUBLIC)) {
     if (Run-Native "icacls.exe" @($env:PUBLIC, "/deny", "*${gsid}:(OI)(CI)F", "/C", "/Q")) {
@@ -201,7 +206,11 @@ function Install-Sandbox {
   } catch { Say "   inbound rule not supported here (outbound block is what matters)" "Yellow" }
   Say "   rule added: the sandbox accounts cannot reach the internet or your network"
   $off = @(Get-NetFirewallProfile | Where-Object { -not $_.Enabled })
-  if ($off.Count) { Say ("   WARNING: Windows Firewall is OFF for: " + (($off | ForEach-Object { $_.Name }) -join ", ") + " - the block only works when it is on") "Yellow" }
+  if ($off.Count) {
+    throw ("Windows Firewall is OFF for: " + (($off | ForEach-Object { $_.Name }) -join ", ") +
+           " - the network block rule only works while Firewall is on. Turn Firewall on for " +
+           "that profile and run setup_sandbox.bat again; nothing is marked configured.")
+  }
 
   # 6. disk quota -------------------------------------------------------------
   Say "`n[6/7] Disk limit: $QuotaGB GB per sandbox account (Windows disk quotas)" "Cyan"
@@ -212,14 +221,17 @@ function Install-Sandbox {
   foreach ($v in $vols) {
     $before = Get-QuotaState $v.DeviceID
     if ($before -ne 2) {
-      if (-not (Run-Native "fsutil.exe" @("quota", "enforce", $v.DeviceID))) { continue }
+      if (-not (Run-Native "fsutil.exe" @("quota", "enforce", $v.DeviceID))) {
+        Say "   $($v.DeviceID): could not turn on disk quotas - sandbox jobs have NO disk limit on this volume" "Yellow"
+        continue
+      }
     }
     $ok = $true
     foreach ($u in $users) {
       if (-not (Run-Native "fsutil.exe" @("quota", "modify", $v.DeviceID, "$warn", "$limit", "$env:COMPUTERNAME\$($u.name)"))) { $ok = $false }
     }
     $quota += [ordered]@{ volume = $v.DeviceID; previous_state = $before }
-    if ($ok) { Say "   $($v.DeviceID) limited" }
+    if ($ok) { Say "   $($v.DeviceID) limited" } else { Say "   $($v.DeviceID): quota only partly applied - some sandbox accounts have NO disk limit on this volume" "Yellow" }
   }
 
   # 7. save -------------------------------------------------------------------
