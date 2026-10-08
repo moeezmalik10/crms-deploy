@@ -125,7 +125,7 @@ const fetchUsers = async () => {
   // ================= RESET PASSWORD =================
   const resetPassword = async (userId) => {
 
-    if (!window.confirm("Reset password to 123?")) return;
+    if (!window.confirm("Reset this user's password?")) return;
 
     try {
 
@@ -141,7 +141,8 @@ const fetchUsers = async () => {
 
       if (!res.ok) throw new Error();
 
-      alert("Password reset to 123");
+      const data = await res.json();
+      alert(`Password reset. New password (share this with the user): ${data.new_password}`);
 
     } catch {
       alert("Failed to reset password");

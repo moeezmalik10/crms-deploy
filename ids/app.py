@@ -6,6 +6,12 @@ from routes.blacklist import blacklist_bp
 
 app = Flask(__name__)
 
+# Render (like the main backend) puts exactly one proxy in front of this service.
+# ProxyFix makes request.remote_addr the real client IP from the trusted hop only,
+# instead of trusting a client-supplied X-Forwarded-For value directly.
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
 CORS(app, resources={
     r"/*": {
         "origins": "*"

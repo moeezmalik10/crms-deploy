@@ -27,6 +27,7 @@ numpy==2.4.4
 packaging==26.0
 pandas==3.0.2
 psycopg2-binary==2.9.11
+PyJWT==2.11.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 PySocks==1.7.1

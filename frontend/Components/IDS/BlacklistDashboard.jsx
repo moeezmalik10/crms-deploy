@@ -10,29 +10,42 @@ export default function BlacklistDashboard() {
 
   const fetchBlockedIPs = async () => {
     try {
-      const res = await fetch(
-        `${IDS_BASE}/blacklisted`
-      );
+      const res = await fetch(`${IDS_BASE}/blacklisted`, {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token")}`
+        }
+      });
 
+      if (!res.ok) {
+        console.log("Error fetching blacklisted IPs: HTTP", res.status);
+        setBlockedIPs([]);
+        return;
+      }
       const data = await res.json();
-      setBlockedIPs(data);
+      setBlockedIPs(Array.isArray(data) ? data : []);
     } catch (error) {
       console.log("Error fetching blacklisted IPs:", error);
+      setBlockedIPs([]);
     }
   };
 
   const unblockIP = async (ip) => {
     try {
-      await fetch(`${IDS_BASE}/unblock`, {
+      const res = await fetch(`${IDS_BASE}/unblock`, {
         method: "DELETE",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token")}`
         },
         body: JSON.stringify({
           ip_address: ip
         })
       });
 
+      if (!res.ok) {
+        console.log("Error unblocking IP: HTTP", res.status);
+        return;
+      }
       fetchBlockedIPs();
     } catch (error) {
       console.log("Error unblocking IP:", error);

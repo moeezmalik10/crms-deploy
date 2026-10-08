@@ -376,7 +376,7 @@ def notify_backend_stop(task_id):
     """Notifies backend that task is complete so it frees the node."""
     try:
         stop_url = f"{BACKEND_BASE_URL}/agent/tasks/{task_id}/stop"
-        API.post(stop_url, json={"task_id": task_id}, timeout=10)
+        API.post(stop_url, json={"task_id": task_id, "pc_name": NODE_NAME}, timeout=10)
         print(f"[agent.py] Backend notified: task {task_id} stopped.")
     except Exception as e:
         print(f"[agent.py] WARNING: Could not notify backend: {e}")
@@ -543,7 +543,7 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
             return
 
         try:
-            API.post(ready_url, json={"status": "ml_started"}, timeout=10)
+            API.post(ready_url, json={"status": "ml_started", "pc_name": NODE_NAME}, timeout=10)
             print("[agent.py] Backend notified: ML task started")
         except Exception as e:
             print(f"[agent.py] Failed to notify backend: {e}")
@@ -614,6 +614,7 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
         # 7. Send payload to backend
         payload = {
             "mode":      "remote",
+            "pc_name":   NODE_NAME,
             "hostname":  vm_name,
             "ip":        vm_ip,
             "username":  cfg["username"],
@@ -663,6 +664,7 @@ def start_vm_for_task(task_id, duration, mode, task_name=None, chunk_id=1, datas
         payload = {
             "mode":     "physical",
             "status":   "reserved",
+            "pc_name":  NODE_NAME,
             "hostname": NODE_NAME,
             "ip":       get_ip(),
             "username": HOST_USERNAME,

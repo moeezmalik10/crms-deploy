@@ -2,7 +2,7 @@ import requests
 
 def get_geo_location(ip_address):
     try:
-        response = requests.get(f"http://ip-api.com/json/{ip_address}")
+        response = requests.get(f"http://ip-api.com/json/{ip_address}", timeout=5)
         data = response.json()
 
         return {

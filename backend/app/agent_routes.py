@@ -246,6 +246,8 @@ def agent_task_status(task_id):
     task = TaskRequest.query.get(task_id)
     if not task:
         return jsonify({"status": "deleted"}), 404
+    if not task_belongs_to_caller(task):
+        return jsonify({"error": "not your task"}), 403
     return jsonify({"status": task.status}), 200
 
 @agent_bp.route("/agent/tasks/<int:task_id>/stop", methods=["POST"])

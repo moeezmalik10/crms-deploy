@@ -290,7 +290,7 @@ def task_status(task_id):
 def report_error(task_id, reason):
     log(f"task {task_id}: {reason}")
     try:
-        _post(f"/agent/tasks/{task_id}/error", json={"reason": reason}, timeout=20)
+        _post(f"/agent/tasks/{task_id}/error", json={"reason": reason, "pc_name": NODE_NAME}, timeout=20)
     except Exception as e:
         log(f"could not report the error: {e}")
 
@@ -361,7 +361,7 @@ def run_job(cmd):
                 f.write(r.content)
         if not re.fullmatch(r"[\w./ -]+", entry) or ".." in entry:
             return report_error(task_id, "invalid entry file name")
-        _post(f"/agent/tasks/{task_id}/ready", json={"mode": "job", "sandbox": mode}, timeout=30)
+        _post(f"/agent/tasks/{task_id}/ready", json={"mode": "job", "sandbox": mode, "pc_name": NODE_NAME}, timeout=30)
         log(f"job {task_id}: {runtime} {entry}{f' part {part}/{parts}' if parts > 1 else ''} in a {mode} sandbox ({cores:g} core, {ram_mb} MB, {disk_mb:g} MB disk, {minutes:g} min)")
 
         if mode == "docker":
@@ -385,10 +385,24 @@ def run_job(cmd):
                 for fn in files:
                     full = os.path.join(root, fn)
                     z.write(full, os.path.relpath(full, out_dir))
-        resp = _post(f"/agent/jobs/{task_id}/result", timeout=180,
-                     data={"exit_code": str(code), "output": out[-60000:], "reason": reason},
-                     files={"result": (f"job_{task_id}_result.zip", buf.getvalue(), "application/zip")})
-        log(f"job {task_id}: finished (exit {code}{', ' + reason if reason else ''}) -> HTTP {resp.status_code}")
+        result_bytes = buf.getvalue()
+        upload_error = None
+        for attempt in range(3):
+            try:
+                resp = _post(f"/agent/jobs/{task_id}/result", timeout=180,
+                             data={"exit_code": str(code), "output": out[-60000:], "reason": reason},
+                             files={"result": (f"job_{task_id}_result.zip", result_bytes, "application/zip")})
+                log(f"job {task_id}: finished (exit {code}{', ' + reason if reason else ''}) -> HTTP {resp.status_code}")
+                upload_error = None
+                break
+            except Exception as e:
+                upload_error = e
+                if attempt < 2:
+                    time.sleep(5)
+        if upload_error:
+            # The job itself finished (exit code known) - only the upload failed, so say that
+            # instead of claiming the job failed on the device and losing the real outcome.
+            report_error(task_id, f"job finished (exit {code}) but uploading the result failed: {upload_error}")
     except Exception as e:
         report_error(task_id, f"job failed on the device: {e}")
     finally:
@@ -608,7 +622,7 @@ def stop_workspace(task_id, reason, notify):
     log(f"workspace {task_id}: removed ({reason})")
     if notify == "stop":
         try:
-            _post(f"/agent/tasks/{task_id}/stop", json={"task_id": task_id}, timeout=20)
+            _post(f"/agent/tasks/{task_id}/stop", json={"task_id": task_id, "pc_name": NODE_NAME}, timeout=20)
         except Exception:
             pass
     elif notify == "error":

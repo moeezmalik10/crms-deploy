@@ -30,7 +30,9 @@ def agent_join():
     """Exchange a one-time join code (made on the website) for a permanent device key."""
     data = request.get_json(silent=True) or {}
     code = (data.get("code") or "").strip().upper()
-    enr = DeviceEnrollment.query.filter_by(code_hash=sha256_hex(code)).first()
+    # Lock the row for the rest of this transaction so two concurrent joins with the
+    # same one-time code can't both read used_at as unset before either commits.
+    enr = DeviceEnrollment.query.filter_by(code_hash=sha256_hex(code)).with_for_update().first()
     now = datetime.now(timezone.utc)
     if not enr or enr.used_at:
         return jsonify({"error": "join code is not valid or was already used - make a new one on the website"}), 400
@@ -41,7 +43,10 @@ def agent_join():
     hostname = (data.get("hostname") or "DEVICE").strip()[:60] or "DEVICE"
     name = hostname
     existing = Node.query.filter_by(name=name).first()
-    if existing and existing.owner_user_id not in (None, enr.user_id):
+    # Only a device this same student already owns may be reused by name - a node
+    # with no owner (e.g. a lab PC registered through the old /register_node flow,
+    # or any other contributor's device) must never be silently taken over.
+    if existing and existing.owner_user_id != enr.user_id:
         n = 2
         while Node.query.filter_by(name=f"{hostname}-{n}").first():
             n += 1

@@ -5,6 +5,7 @@ from ids.sql_detector import detect_sql_injection
 from ids.xss_detector import detect_xss
 from ids.blacklist import is_blacklisted, blacklist_ip
 from ids.attack_counter import count_attacks
+from ids.settings import JWT_SECRET_KEY
 
 detect_bp = Blueprint("detect", __name__)
 
@@ -15,11 +16,16 @@ def detect():
     email = data.get("email", "")
     password = data.get("password", "")
 
-    # Get real client IP
-    ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
-
-    if "," in ip_address:
-        ip_address = ip_address.split(",")[0].strip()
+    # Real client IP: ProxyFix (see app.py) already resolved this from the proxy's
+    # own trusted X-Forwarded-For hop, so a client can no longer spoof it directly.
+    # When the backend itself calls us (screening a login server-side), it is the
+    # proxy's hop instead of the browser, so it forwards the real client IP - trust
+    # that forwarded value only when it's paired with the backend's own secret.
+    ip_address = request.remote_addr or ""
+    if JWT_SECRET_KEY and request.headers.get("X-Internal-Secret") == JWT_SECRET_KEY:
+        forwarded = (request.headers.get("X-Original-IP") or "").strip()
+        if forwarded:
+            ip_address = forwarded
 
     # BLOCK BLACKLISTED IP FIRST
     if is_blacklisted(ip_address):

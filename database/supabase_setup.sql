@@ -127,7 +127,12 @@ CREATE TABLE IF NOT EXISTS public.blacklisted_ips (
 );
 
 -- Access rules: the backend (database login) and the IDS (service_role key) bypass these.
--- The browser (anon key) may only READ intrusion_logs for the Security Dashboard.
+-- intrusion_logs holds attacker/victim emails and IP addresses. The Security Dashboard
+-- reads it through the backend's own admin-only API (GET /admin/intrusion-logs), which
+-- uses the service_role key server-side and bypasses RLS - so no policy below grants
+-- the browser's anon/authenticated roles any access to it; RLS with no policy denies
+-- both by default. The same goes for blacklisted_ips (read via the IDS's own admin-only
+-- /blacklisted route).
 ALTER TABLE public."user"             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.node               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.node_metrics       ENABLE ROW LEVEL SECURITY;
@@ -137,26 +142,21 @@ ALTER TABLE public.ml_results         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.intrusion_logs     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blacklisted_ips    ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Dashboard can read intrusion logs" ON public.intrusion_logs;
-CREATE POLICY "Dashboard can read intrusion logs" ON public.intrusion_logs
-  FOR SELECT TO anon, authenticated USING (true);
 
 -- Storage bucket for ML datasets (public, as in the original project)
 INSERT INTO storage.buckets (id, name, public) VALUES ('datasets', 'datasets', true)
 ON CONFLICT (id) DO NOTHING;
 
 -- Starter accounts: admin@uog.edu.pk / Admin@12345   and   student1@uog.edu.pk / Student@12345
-UPDATE public."user" SET role = 'admin',
-  password = 'scrypt:32768:8:1$lCVisqKDgiL8NE50$ffe0ff301d33a6411b72d655b16e20c599d0f1c8f3d31a3ac99f7d9587014cc4c016f351908709290a6fb5901cd93ed7fc85cbff56b088dbd0698b5786df4e37'
-WHERE lower(trim(email)) = 'admin@uog.edu.pk';
+-- Created only if they don't exist yet. Re-running this script later (e.g. to pick up the
+-- resource-pool section below) must never reset a real admin/student's live password back
+-- to this public default, so there is no UPDATE here anymore - only INSERT ... WHERE NOT EXISTS.
 INSERT INTO public."user" (username, email, password, role, created_at)
 SELECT 'admin', 'admin@uog.edu.pk',
   'scrypt:32768:8:1$lCVisqKDgiL8NE50$ffe0ff301d33a6411b72d655b16e20c599d0f1c8f3d31a3ac99f7d9587014cc4c016f351908709290a6fb5901cd93ed7fc85cbff56b088dbd0698b5786df4e37',
   'admin', now()
 WHERE NOT EXISTS (SELECT 1 FROM public."user" WHERE lower(trim(email)) = 'admin@uog.edu.pk');
 
-UPDATE public."user" SET role = 'student',
-  password = 'scrypt:32768:8:1$3SBFhxfobKwUncO5$c387f1b33f7f71f32c67f309bd288dd6ad140dedddbf66c842c760bd061fd2c09cff63ffd2674d53703bb3c1eeb521f77f34fcc48168c1ed63cc931ccfba7adc'
-WHERE lower(trim(email)) = 'student1@uog.edu.pk';
 INSERT INTO public."user" (username, email, password, role, created_at)
 SELECT 'student1', 'student1@uog.edu.pk',
   'scrypt:32768:8:1$3SBFhxfobKwUncO5$c387f1b33f7f71f32c67f309bd288dd6ad140dedddbf66c842c760bd061fd2c09cff63ffd2674d53703bb3c1eeb521f77f34fcc48168c1ed63cc931ccfba7adc',
@@ -183,6 +183,8 @@ ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS paused BOOLEAN DEFAULT FALSE;
 ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS allow_light_sandbox BOOLEAN DEFAULT FALSE;
 ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS sandbox_mode VARCHAR(20);
 ALTER TABLE public."node" ADD COLUMN IF NOT EXISTS agent_version VARCHAR(20);
+-- Two nodes must never share a device key (NULL is fine - unkeyed/legacy nodes have no key).
+CREATE UNIQUE INDEX IF NOT EXISTS node_device_key_hash_key ON public."node" (device_key_hash);
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS required_disk_mb DOUBLE PRECISION;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_runtime VARCHAR(20);
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_entry VARCHAR(255);
