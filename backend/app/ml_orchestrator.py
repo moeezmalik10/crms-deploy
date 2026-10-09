@@ -4,9 +4,9 @@ import uuid
 import pandas as pd
 import numpy as np
 from app import db
-from app.models import Node, TaskRequest, MLResult
-from app.allocation_engine import TASK_PROFILES, log_event
-from datetime import datetime, timezone, timedelta
+from app.models import TaskRequest, MLResult
+from app.allocation_engine import TASK_PROFILES, lock_online_nodes, log_event
+from datetime import datetime, timezone
 from supabase import create_client
 
 def _nodes_meeting_ml_profile(nodes):
@@ -49,9 +49,9 @@ def _persist_split_dataset(df, user_id):
 
 
 def spawn_distributed_ml(user_id, dataset_url, model_type, validation_type, split_mode="iid"):
-    # Identify Online Nodes that meet ML slot requirements
-    timeout = datetime.now(timezone.utc) - timedelta(seconds=45)
-    candidates = Node.query.filter(Node.status == 'online', Node.last_heartbeat > timeout).all()
+    # Identify Online Nodes that meet ML slot requirements. Locked the same way allocate_task
+    # locks its candidates, so this can't race a compute-task allocation onto the same node.
+    candidates = lock_online_nodes()
     nodes = _nodes_meeting_ml_profile(candidates)
 
     # Never place an ML chunk on a node that is already running a physical/remote student

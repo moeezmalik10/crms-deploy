@@ -44,9 +44,17 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     
+    # The scheduler is a module-level singleton shared across every create_app() call, so in
+    # tests (a fresh sqlite file per test) its background jobs would keep running against a
+    # stale engine from a previous test's app and hold that test's db file open. Tests set
+    # DISABLE_SCHEDULER=true to skip starting the background jobs; this is never set in
+    # production. init_app() itself still runs either way - app.tasks' functions call
+    # scheduler.app_context() directly, which needs scheduler.app set even when its jobs
+    # aren't running (e.g. a test calling process_queue() itself, synchronously).
     if not scheduler.running:
         scheduler.init_app(app)
-        scheduler.start()
+        if os.environ.get("DISABLE_SCHEDULER", "").lower() != "true":
+            scheduler.start()
 
     # Import blueprints/routes
     from app.auth_routes import auth_bp

@@ -5,6 +5,7 @@ files in pooled storage. Admins see every device with its IP addresses and can r
 """
 import hashlib
 import io
+import json
 import os
 import zipfile
 from datetime import datetime, timezone, timedelta
@@ -14,11 +15,13 @@ from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from sqlalchemy import func
 
 from app import db
-from app.allocation_engine import allocate_task, log_event, release_node_tasks, stop_task
-from app.models import (DeviceEnrollment, Node, NodeMetrics, PoolBlob, PoolChunk, PoolFile,
-                        PoolReplica, TaskExecutionLog, TaskRequest, User)
+from app.allocation_engine import (PRIORITY_BATCH, allocate_task, higher_or_equal_priority_pending,
+                                   log_event, release_node_tasks, stop_task)
+from app.models import (DeviceEnrollment, Node, NodeMetrics, NodeMetricsHistory, PoolBlob, PoolChunk,
+                        PoolFile, PoolReplica, TaskExecutionLog, TaskRequest, User)
 from app.pool_security import (decrypt_chunk, encrypt_chunk, new_file_key, new_join_code,
                                sha256_hex, unwrap_key, wrap_key)
+from app.quotas import job_quota_message
 
 pool_bp = Blueprint("pool", __name__)
 
@@ -165,6 +168,58 @@ def devices():
            for n in nodes]
     order = {"online": 0, "paused": 1, "offline": 2}
     out.sort(key=lambda d: (order[d["state"]], d["name"]))
+    return jsonify(out)
+
+
+@pool_bp.route("/pool/devices/<int:node_id>/history", methods=["GET"])
+@jwt_required()
+def device_history(node_id):
+    """Up to 7 days of sampled CPU/RAM/storage history for this device, for a usage chart."""
+    user, role = _me()
+    n = Node.query.get_or_404(node_id)
+    if not _can_manage(n, user, role):
+        return jsonify({"error": "not your device"}), 403
+    rows = (NodeMetricsHistory.query.filter_by(node_id=node_id)
+            .order_by(NodeMetricsHistory.timestamp.asc()).all())
+    return jsonify([{
+        "timestamp": _aware(r.timestamp).isoformat(), "cpu_used": r.cpu_used,
+        "memory_total_mb": r.memory_total_mb, "memory_free_mb": r.memory_free_mb,
+        "storage_total_gb": r.storage_total_gb, "storage_free_gb": r.storage_free_gb,
+    } for r in rows])
+
+
+@pool_bp.route("/pool/ledger", methods=["GET"])
+@jwt_required()
+def ledger():
+    """What the pool manager actually tracks per device: installed capacity, what is
+    currently promised to a task that hasn't started yet ("reserved"), and what is actually
+    running ("in_use") - the three-way split the proposal's pool manager is built around,
+    instead of a single free/used number."""
+    _, role = _me()
+    if role != "admin":
+        return jsonify({"error": "Admin access required"}), 403
+    nodes = Node.query.filter(Node.device_key_hash.isnot(None)).all()
+    node_ids = [n.id for n in nodes]
+    active = TaskRequest.query.filter(
+        TaskRequest.assigned_node_id.in_(node_ids),
+        TaskRequest.status.in_(("allocated", "starting", "running")),
+    ).all() if node_ids else []
+    by_node = {n_id: {"reserved_cpu": 0, "reserved_ram_mb": 0, "in_use_cpu": 0, "in_use_ram_mb": 0} for n_id in node_ids}
+    for t in active:
+        bucket = "in_use" if t.status == "running" else "reserved"   # allocated/starting = promised, not started
+        by_node[t.assigned_node_id][f"{bucket}_cpu"] += (t.required_cpu or 0)
+        by_node[t.assigned_node_id][f"{bucket}_ram_mb"] += (t.required_ram_mb or 0)
+    out = []
+    for n in nodes:
+        row = by_node[n.id]
+        out.append({
+            "id": n.id, "name": n.name, "state": node_state(n),
+            "installed_cpu": n.total_cores, "installed_ram_mb": n.total_ram_mb,
+            "shared_cpu": n.share_cores, "shared_ram_mb": n.share_ram_mb,
+            **row,
+            "free_cpu": max(0, (n.share_cores or n.total_cores or 0) - row["reserved_cpu"] - row["in_use_cpu"]),
+            "free_ram_mb": max(0, (n.share_ram_mb or n.total_ram_mb or 0) - row["reserved_ram_mb"] - row["in_use_ram_mb"]),
+        })
     return jsonify(out)
 
 
@@ -332,7 +387,21 @@ def submit_job():
         except ValueError:
             return default
 
-    parts = int(num("parts", 1, MAX_PARTS, 1))
+    kind = (request.form.get("kind") or "").strip().lower()
+    if kind not in ("", "sweep"):
+        return jsonify({"error": "kind must be empty (custom) or 'sweep'"}), 400
+
+    param_sets = None
+    if kind == "sweep":
+        param_sets = [s for s in (request.form.get("param_sets") or "").splitlines() if s.strip()]
+        if len(param_sets) < 2:
+            return jsonify({"error": "a parameter sweep needs at least 2 parameter sets, one per line"}), 400
+        if len(param_sets) > MAX_PARTS:
+            return jsonify({"error": f"a parameter sweep supports at most {MAX_PARTS} parameter sets"}), 400
+        parts = len(param_sets)   # one part per parameter set, not a separately chosen count
+    else:
+        parts = int(num("parts", 1, MAX_PARTS, 1))
+
     dfile = request.files.get("data")
     data_name, data_parts = None, None
     if dfile and dfile.filename:
@@ -343,16 +412,12 @@ def submit_job():
         header = request.form.get("header", "1") not in ("0", "false", "off")
         data_parts = _split_lines(raw, parts, header) if parts > 1 else [raw]
 
-    active_singles = TaskRequest.query.filter(TaskRequest.user_id == user.id, TaskRequest.mode == "job",
-                                              TaskRequest.parent_task_id.is_(None),
-                                              TaskRequest.status.in_(("pending",) + ACTIVE)).count()
-    active_groups = sum(1 for g in TaskRequest.query.filter_by(user_id=user.id, mode="job_group").all()
-                        if any(c.status in ("pending",) + ACTIVE for c in g.sub_tasks))
-    if active_singles + active_groups >= 3:
-        return jsonify({"error": "you already have 3 jobs waiting or running"}), 400
+    quota_error = job_quota_message(user.id)
+    if quota_error:
+        return jsonify({"error": quota_error}), 400
 
     common = dict(user_id=user.id, task_type=f"job_{runtime}", job_runtime=runtime, job_entry=entry,
-                  job_args=(request.form.get("args") or "")[:500],
+                  job_args=(request.form.get("args") or "")[:500], priority=PRIORITY_BATCH, job_kind=kind or None,
                   required_cpu=int(num("cores", 1, 16, 1)), required_ram_mb=num("ram_mb", 128, 32768, 1024),
                   required_disk_mb=num("disk_mb", 50, 20480, 500), duration_minutes=int(num("max_minutes", 1, 240, 10)))
     now = datetime.now(timezone.utc)
@@ -375,13 +440,17 @@ def submit_job():
         db.session.flush()
         log_event(task.id, None, "pending", "Job submitted")
         db.session.commit()
-        result = allocate_task(task.id)
+        if higher_or_equal_priority_pending(task.priority, exclude_id=task.id):
+            result = {"status": "pending", "message": "Queued behind a higher-priority request."}
+        else:
+            result = allocate_task(task.id)
         return jsonify({"job": _job_json(TaskRequest.query.get(task.id)), "allocation": result})
 
     # Split job: a group with one part per device
+    group_message = (f"Parameter sweep over {parts} parameter sets" if kind == "sweep"
+                     else f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else ""))
     group = TaskRequest(mode="job_group", status="group", created_at=now, chunk_id=parts,
-                        message=f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else ""),
-                        **common)
+                        message=group_message, **common)
     db.session.add(group)
     db.session.flush()
     children = []
@@ -389,15 +458,43 @@ def submit_job():
         files = dict(program)
         if data_parts:
             files[data_name] = data_parts[i]
+        child_fields = dict(common)
+        if param_sets:
+            child_fields["job_args"] = param_sets[i][:500]
         child = TaskRequest(mode="job", status="pending", parent_task_id=group.id, chunk_id=i + 1,
-                            input_blob_id=add_input(files, "job.zip"), created_at=now, **common)
+                            input_blob_id=add_input(files, "job.zip"), created_at=now, **child_fields)
         db.session.add(child)
         db.session.flush()
         log_event(child.id, None, "pending", f"Part {i + 1} of {parts} submitted")
         children.append(child.id)
     db.session.commit()
-    allocations = [allocate_task(cid) for cid in children]
+    if higher_or_equal_priority_pending(PRIORITY_BATCH, exclude_ids=children):
+        allocations = [{"status": "pending", "message": "Queued behind a higher-priority request."} for _ in children]
+    else:
+        allocations = [allocate_task(cid) for cid in children]
     return jsonify({"job": _group_json(TaskRequest.query.get(group.id)), "allocation": allocations})
+
+
+def _sweep_scores(kids):
+    """{chunk_id: score} for a parameter-sweep group's parts. Each part's program is expected
+    to write output/result.json with a numeric "score" field - that file lands at the result
+    zip's root (pool_runtime.run_job flattens the job's own output/ folder into the zip)."""
+    scores = {}
+    for c in kids:
+        if c.status != "completed" or not c.result_blob_id:
+            continue
+        blob = PoolBlob.query.get(c.result_blob_id)
+        if not blob:
+            continue
+        try:
+            raw = _read_zip(blob.data).get("result.json")
+            if raw is not None:
+                score = json.loads(raw).get("score")
+                if isinstance(score, (int, float)):
+                    scores[c.chunk_id] = score
+        except Exception:
+            continue
+    return scores
 
 
 def _group_json(g):
@@ -434,7 +531,15 @@ def _group_json(g):
         "output": "\n".join(f"===== part {c.chunk_id} on {c.assigned_pc or '-'} =====\n{c.output_tail or ''}" for c in kids
                             if c.output_tail),
         "has_result": any(c.result_blob_id for c in kids), "reason": reason, "exit_code": None,
+        "kind": g.job_kind,
     }
+    if g.job_kind == "sweep" and status == "completed":
+        scores = _sweep_scores(kids)
+        if scores:
+            best_chunk = max(scores, key=scores.get)
+            j["best_part"] = best_chunk
+            j["best_score"] = scores[best_chunk]
+            j["best_args"] = next((c.job_args for c in kids if c.chunk_id == best_chunk), None)
     return j
 
 
@@ -488,6 +593,19 @@ def _group_result(g):
             for p in pieces[1:]:
                 merged += p.decode("utf-8", errors="replace").splitlines(keepends=True)[1:]
             files[f"merged/{n}"] = "".join(merged).encode("utf-8")
+    if g.job_kind == "sweep":
+        scores = _sweep_scores(kids)
+        if scores:
+            best_chunk = max(scores, key=scores.get)
+            best = next(c for c in kids if c.chunk_id == best_chunk)
+            summary.append("")
+            summary.append(f"Parameter sweep winner: part {best_chunk} (args: {best.job_args!r}), "
+                           f"score {scores[best_chunk]}")
+            if f"part_{best_chunk}/result.json" in files:
+                files["best/result.json"] = files[f"part_{best_chunk}/result.json"]
+        else:
+            summary.append("")
+            summary.append("Parameter sweep: no part reported a usable output/result.json score.")
     files["summary.txt"] = "\n".join(summary).encode("utf-8")
     return Response(_make_zip(files), mimetype="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="job_{g.id}_all_parts.zip"'})
@@ -535,9 +653,13 @@ def delete_job(task_id):
 
 # ---------------------------------------------------------------- pooled storage
 def _storage_targets(size, exclude=()):
-    """Online contributed devices that share storage and have room, most room first."""
+    """Online contributed devices that share storage and have room, most room first. Locked
+    for the rest of this transaction (same idea as allocate_task's node lock) so two uploads
+    committed around the same time can't both believe the same device has room for them."""
     out = []
-    for n in Node.query.filter(Node.device_key_hash.isnot(None), Node.paused.isnot(True)).all():
+    for n in Node.query.filter(
+        Node.device_key_hash.isnot(None), Node.paused.isnot(True)
+    ).with_for_update(of=Node).all():
         if n.id in exclude or node_state(n) != "online" or not n.share_storage_gb:
             continue
         room = n.share_storage_gb * 1024**3 - _storage_used_bytes(n.id)

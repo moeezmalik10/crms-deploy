@@ -1,17 +1,23 @@
 from datetime import datetime, timezone, timedelta
 from app import db, scheduler
-from app.models import TaskRequest, Node
+from app.models import TaskRequest, Node, NodeMetricsHistory
 from app.allocation_engine import allocate_task, stop_task, release_node_tasks, log_event
+
+METRICS_HISTORY_DAYS = 7
 
 @scheduler.task('interval', id='process_queue', seconds=15) # Increased to 15s
 def process_queue():
     with scheduler.app.app_context():
         try:
-            # Only attempt 3 tasks at a time to keep the loop fast
+            # Highest priority first (lower number = served first), then oldest first within
+            # a priority tier. A capped batch, not just the oldest 3: with a fixed limit(3)
+            # ordered only by created_at, 3 requests stuck waiting for capacity would silently
+            # block every other pending request behind them from ever being attempted, no
+            # matter how small or how long it had been waiting.
             queued_tasks = TaskRequest.query.filter(
                 TaskRequest.status == "pending",
                 TaskRequest.assigned_node_id.is_(None)
-            ).order_by(TaskRequest.created_at.asc()).limit(3).all()
+            ).order_by(TaskRequest.priority.asc(), TaskRequest.created_at.asc()).limit(20).all()
 
             for task in queued_tasks:
                 # Use a try block inside the loop so one bad task doesn't kill the whole queue
@@ -116,5 +122,21 @@ def pool_storage_upkeep():
         except Exception as e:
             db.session.rollback()
             print(f"Pool storage upkeep error: {e}")
+        finally:
+            db.session.remove()
+
+
+@scheduler.task('interval', id='trim_metrics_history', hours=1)
+def trim_metrics_history():
+    """Keep the pool-dashboard usage history to a rolling window instead of growing forever -
+    the live NodeMetrics row for each node is untouched, only the sampled history trail."""
+    with scheduler.app.app_context():
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=METRICS_HISTORY_DAYS)
+            NodeMetricsHistory.query.filter(NodeMetricsHistory.timestamp < cutoff).delete()
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Metrics history trim error: {e}")
         finally:
             db.session.remove()

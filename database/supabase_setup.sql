@@ -193,4 +193,7 @@ ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS input_blob_id INTEGER
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS result_blob_id INTEGER;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS exit_code INTEGER;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS output_tail TEXT;
--- Tables device_enrollment, pool_blob, pool_file, pool_chunk, pool_replica are created by the backend at start-up.
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 50;
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_kind VARCHAR(20);
+-- Tables device_enrollment, pool_blob, pool_file, pool_chunk, pool_replica, node_metrics_history
+-- are created by the backend at start-up.

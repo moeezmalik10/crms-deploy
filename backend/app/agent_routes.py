@@ -2,7 +2,7 @@ import json
 from flask import Blueprint, request, jsonify, g
 from datetime import datetime, timezone, timedelta
 from app import db
-from app.models import Node, NodeMetrics, TaskRequest
+from app.models import Node, NodeMetrics, NodeMetricsHistory, TaskRequest
 from app.pool_security import agent_auth, task_belongs_to_caller, client_public_ip
 from app.allocation_engine import stop_task, log_event, release_node_tasks 
 from sqlalchemy import or_
@@ -12,6 +12,10 @@ agent_bp = Blueprint("agent", __name__)
 # =====================
 # AGENT ROUTES
 # =====================
+def _aware(dt):
+    return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _apply_hardware(node, data):
     """Hardware facts an agent reports at registration and in heartbeats."""
     hw = data.get("hardware") or {}
@@ -119,6 +123,18 @@ def agent_heartbeat():
     metrics.cpu_free = 100.0 - (metrics.cpu_used or 0)
     metrics.timestamp = datetime.now(timezone.utc)
     metrics.raw_payload = data
+
+    # Sample into the history trail at most every 5 minutes per node - every heartbeat (30s)
+    # would be far more granularity than the pool dashboard needs and would grow the table
+    # fast; app.tasks.trim_metrics_history prunes anything older than 7 days.
+    last_sample = NodeMetricsHistory.query.filter_by(node_id=node.id) \
+        .order_by(NodeMetricsHistory.timestamp.desc()).first()
+    if not last_sample or (metrics.timestamp - _aware(last_sample.timestamp)) >= timedelta(minutes=5):
+        db.session.add(NodeMetricsHistory(
+            node_id=node.id, cpu_used=metrics.cpu_used, memory_total_mb=metrics.memory_total_mb,
+            memory_free_mb=metrics.memory_free_mb, storage_total_gb=metrics.storage_total_gb,
+            storage_free_gb=metrics.storage_free_gb, timestamp=metrics.timestamp,
+        ))
 
     db.session.commit()
     return jsonify({"status": "updated", "settings": _settings(node)})
