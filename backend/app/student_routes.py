@@ -2,7 +2,8 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone, timedelta
 from app import db
 from app.models import User, TaskRequest, MLResult
-from app.allocation_engine import allocate_task, stop_task, log_event
+from app.allocation_engine import allocate_task, default_priority, higher_or_equal_priority_pending, stop_task, log_event
+from app.quotas import session_quota_message
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 
 student_bp = Blueprint("student", __name__)
@@ -35,19 +36,13 @@ def request_task_frontend():
         return jsonify({"error": "Unauthorized"}), 401
     user_id = current_user.id
 
-    # GUARD CHECK: Ensure User ID cannot have more than one non-terminal task
-    active_task = TaskRequest.query.filter(
-        TaskRequest.user_id == user_id,
-        TaskRequest.status.in_(["pending", "starting", "running", "queued"]),
-        TaskRequest.mode.notin_(["job", "job_group"])   # pool jobs don't block a session
-    ).first()
-
-    if active_task:
-        return jsonify({
-            "error": "You already have an active session.",
-            "task_id": active_task.id,
-            "status": active_task.status
-        }), 400
+    # GUARD CHECK: one source of truth for the session quota (see app/quotas.py) - this used
+    # to check its own status list here, which omitted "allocated" and included a status that
+    # was never actually used ("queued"), so a student with an allocated-but-not-yet-started
+    # session could sneak a second one through.
+    quota_error = session_quota_message(user_id)
+    if quota_error:
+        return jsonify({"error": quota_error}), 400
 
     # CREATE NEW TASK
     task = TaskRequest(
@@ -56,15 +51,20 @@ def request_task_frontend():
         mode=data["mode"],
         duration_minutes=data.get("duration_minutes"),
         status="pending",
+        priority=default_priority(data["mode"]),
         created_at=datetime.now(timezone.utc)
     )
     db.session.add(task)
-    db.session.commit() 
+    db.session.commit()
     log_event(task.id, None, "pending", "Task created by student")
     db.session.commit()  # Commit the log entry
-    
-    # TRIGGER ALLOCATION
-    result = allocate_task(task.id)
+
+    # TRIGGER ALLOCATION - but not ahead of a request that outranks (or ties) this one and is
+    # already waiting; that one gets served first via the priority-ordered queue (app.tasks).
+    if higher_or_equal_priority_pending(task.priority, exclude_id=task.id):
+        result = {"status": "pending", "message": "Queued behind a higher-priority request."}
+    else:
+        result = allocate_task(task.id)
     return jsonify({"allocation": result, "task_id": task.id})
 
 @student_bp.route("/tasks/<int:task_id>/allocate", methods=["POST"])

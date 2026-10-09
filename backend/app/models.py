@@ -90,6 +90,25 @@ class NodeMetrics(db.Model):
     raw_payload = db.Column(db.JSON)
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+
+class NodeMetricsHistory(db.Model):
+    """A sampled trail of NodeMetrics over time - NodeMetrics itself holds exactly one row per
+    node (each heartbeat updates it in place), so it has no history to show on a usage chart.
+    Appended to at most every few minutes per node (see agent_heartbeat) and trimmed after 7
+    days (see app.tasks.trim_metrics_history)."""
+    __tablename__ = "node_metrics_history"
+
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(db.Integer, db.ForeignKey("node.id"), nullable=False)
+
+    cpu_used = db.Column(db.Float)
+    memory_total_mb = db.Column(db.Float)
+    memory_free_mb = db.Column(db.Float)
+    storage_total_gb = db.Column(db.Float)
+    storage_free_gb = db.Column(db.Float)
+
+    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
 # =========================
 # TASK REQUESTS (CORE TABLE)
 # =========================
@@ -127,7 +146,11 @@ class TaskRequest(db.Model):
     mode = db.Column(db.String(20))          # physical / remote
     duration_minutes = db.Column(db.Integer)
 
-    status = db.Column(db.String(20), default="pending") 
+    # Lower runs first when the pool is contended: interactive sessions (10) ahead of
+    # batch jobs (50). See app.allocation_engine.default_priority().
+    priority = db.Column(db.Integer, default=50)
+
+    status = db.Column(db.String(20), default="pending")
     assigned_pc = db.Column(db.String(100)) 
     link = db.Column(db.String(255))    
     vm_username = db.Column(db.String(100)) 
@@ -151,6 +174,9 @@ class TaskRequest(db.Model):
     result_blob_id = db.Column(db.Integer)
     exit_code = db.Column(db.Integer)
     output_tail = db.Column(db.Text)
+    # None = run-arbitrary-code job (today's behaviour). "sweep" = parameter sweep: each part
+    # gets its own argument set, the group's result is the part with the best score.
+    job_kind = db.Column(db.String(20))
 
 # =========================
 # Machine Learning Results (For storing trained models and metadata)

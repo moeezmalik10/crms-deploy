@@ -17,6 +17,8 @@ export default function Jobs() {
   const [form, setForm] = useState({ runtime: "python", entry: "", args: "", cores: 1, ram_mb: 1024, disk_mb: 500, max_minutes: 10 });
   const [file, setFile] = useState(null);
   const [parts, setParts] = useState(1);
+  const [kind, setKind] = useState("");          // "" = custom job, "sweep" = parameter sweep
+  const [paramSets, setParamSets] = useState("");
   const [data, setData] = useState(null);
   const [header, setHeader] = useState(true);
   const [ready, setReady] = useState(null);   // devices that can run a job right now
@@ -38,11 +40,19 @@ export default function Jobs() {
   async function submit(e) {
     e.preventDefault();
     if (!file) return setErr("Choose a .py, .cpp or .zip file first.");
+    if (kind === "sweep" && paramSets.trim().split("\n").filter((s) => s.trim()).length < 2) {
+      return setErr("A parameter sweep needs at least 2 parameter sets, one per line.");
+    }
     setBusy(true); setErr("");
     const fd = new FormData();
     fd.append("file", file);
     Object.entries(form).forEach(([k, v]) => fd.append(k, v));
-    fd.append("parts", parts);
+    if (kind === "sweep") {
+      fd.append("kind", "sweep");
+      fd.append("param_sets", paramSets);
+    } else {
+      fd.append("parts", parts);
+    }
     if (data) { fd.append("data", data); fd.append("header", header ? "1" : "0"); }
     try {
       const r = await api("/pool/jobs", { method: "POST", body: fd });
@@ -97,28 +107,49 @@ export default function Jobs() {
             <Field label="Disk (MB)"><input type="number" min="50" step="50" value={form.disk_mb} onChange={set("disk_mb")} /></Field>
             <Field label="Time limit (minutes)"><input type="number" min="1" max="240" value={form.max_minutes} onChange={set("max_minutes")} /></Field>
           </div>
-          <div className="split">
-            <Field label="Split across devices" hint={ready == null ? "" : `${ready} ${ready === 1 ? "device" : "devices"} can run jobs right now`}>
-              <select value={parts} onChange={(e) => setParts(Number(e.target.value))}>
-                <option value={1}>No - run on one device</option>
-                {[2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n} parts, on {n} devices</option>)}
-              </select>
+          <Field label="Job type" hint="A sweep runs a different parameter set per device and keeps the best score">
+            <select value={kind} onChange={(e) => setKind(e.target.value)}>
+              <option value="">Custom - run my own code</option>
+              <option value="sweep">Parameter sweep - try several parameter sets at once</option>
+            </select>
+          </Field>
+          {kind === "sweep" ? (
+            <Field label="Parameter sets (one per line, one device per line)"
+                  hint="Each line becomes that part's Arguments. Your program must write output/result.json with a numeric score field.">
+              <textarea rows={4} placeholder={"--lr 0.01 --depth 3\n--lr 0.1 --depth 5\n--lr 0.05 --depth 4"}
+                        value={paramSets} onChange={(e) => setParamSets(e.target.value)} />
             </Field>
-            <Field label="Data file (optional)" hint={parts > 1 ? "Rows are shared out: each part gets its own slice" : "Copied next to your program"}>
-              <input ref={dataRef} type="file" accept=".csv,.txt,.tsv,.jsonl" onChange={(e) => setData(e.target.files[0] || null)} />
-            </Field>
-            <label className="check">
-              <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} disabled={!data} />
-              First row is a header (kept in every part)
-            </label>
-          </div>
-          {parts > 1 && (
+          ) : (
+            <div className="split">
+              <Field label="Split across devices" hint={ready == null ? "" : `${ready} ${ready === 1 ? "device" : "devices"} can run jobs right now`}>
+                <select value={parts} onChange={(e) => setParts(Number(e.target.value))}>
+                  <option value={1}>No - run on one device</option>
+                  {[2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n} parts, on {n} devices</option>)}
+                </select>
+              </Field>
+              <Field label="Data file (optional)" hint={parts > 1 ? "Rows are shared out: each part gets its own slice" : "Copied next to your program"}>
+                <input ref={dataRef} type="file" accept=".csv,.txt,.tsv,.jsonl" onChange={(e) => setData(e.target.files[0] || null)} />
+              </Field>
+              <label className="check">
+                <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} disabled={!data} />
+                First row is a header (kept in every part)
+              </label>
+            </div>
+          )}
+          {kind !== "sweep" && parts > 1 && (
             <p className="small muted" style={{ margin: 0, maxWidth: "80ch" }}>
               Each part runs at the same time on a different device, with the cores and memory above <b>per part</b>.
               Your program reads <code>CRMS_PART</code> and <code>CRMS_PARTS</code> (e.g. part 2 of {parts}) or simply
               processes the data slice it was given. CSV files the parts write to <b>output</b> are joined back into one.
               Splitting pays off when the job takes more than about a minute; each part needs a few seconds to start.
               {ready != null && parts > ready && <span style={{ color: "var(--warn)" }}> Only {ready} can run now, so some parts will wait or share a device.</span>}
+            </p>
+          )}
+          {kind === "sweep" && (
+            <p className="small muted" style={{ margin: 0, maxWidth: "80ch" }}>
+              Each line runs at the same time on a different device with the arguments from that line instead of the
+              Arguments field above. When every part finishes, the job's result is the part with the highest score
+              from its <code>output/result.json</code> (<code>{"{\"score\": 0.93}"}</code>).
             </p>
           )}
           <div className="row">
@@ -141,7 +172,9 @@ export default function Jobs() {
                         <div>
                           <div className="row">
                             <b>#{j.id} {j.entry}</b><span className={cls}>{label}</span>
+                            {j.kind === "sweep" && <span className="chip">parameter sweep</span>}
                             {j.group && <span className="chip">{j.parts_done}/{j.parts.length} parts finished</span>}
+                            {j.best_part != null && <span className="chip good">best: part {j.best_part}, score {j.best_score}</span>}
                             {j.exit_code != null && <span className="small muted">exit code {j.exit_code}</span>}
                           </div>
                           <div className="small muted" style={{ marginTop: 4 }}>

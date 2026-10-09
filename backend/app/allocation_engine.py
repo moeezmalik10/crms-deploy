@@ -18,6 +18,44 @@ TASK_PROFILES = {
 # Disk a sandboxed workspace may use on the device (MB)
 WORKSPACE_DISK_MB = 3072
 
+# Scheduling priority: lower runs first when the pool is contended. Interactive sessions
+# (a student sitting at a VM/dev environment right now) outrank batch work (pool jobs,
+# split jobs, ML training) that nobody is waiting in front of a screen for.
+PRIORITY_INTERACTIVE = 10
+PRIORITY_BATCH = 50
+
+
+def default_priority(mode):
+    return PRIORITY_INTERACTIVE if mode in ("physical", "remote") else PRIORITY_BATCH
+
+
+def lock_online_nodes():
+    """Online, recently-heard-from nodes, locked for the rest of this transaction. Every path
+    that decides where resource-pool work lands - compute tasks here, ML chunks in
+    spawn_distributed_ml, storage placement in _storage_targets - must lock its candidate
+    nodes, or two concurrent allocators can each believe the same free capacity is available
+    and both commit to using it (over-allocation). Concurrent callers block on these rows
+    instead of using SKIP LOCKED, so one allocator waiting never sees an empty candidate set
+    just because a peer is mid-decision."""
+    timeout_limit = datetime.now(timezone.utc) - timedelta(seconds=45)
+    return Node.query.filter(
+        Node.status == 'online',
+        Node.last_heartbeat > timeout_limit
+    ).with_for_update(of=Node).all()
+
+
+def higher_or_equal_priority_pending(priority, exclude_id=None, exclude_ids=None):
+    """True if some other pending task would outrank (or tie) this one - used at submit time
+    so a new request doesn't jump an immediate allocation ahead of a request that's already
+    waiting its turn; it falls back to the priority-ordered queue (app.tasks.process_queue)
+    instead. For a split job's children, pass exclude_ids=<all sibling ids> - they share one
+    priority and must not count against each other."""
+    q = TaskRequest.query.filter(TaskRequest.status == "pending", TaskRequest.priority <= priority)
+    ids = list(exclude_ids) if exclude_ids is not None else ([exclude_id] if exclude_id is not None else [])
+    if ids:
+        q = q.filter(TaskRequest.id.notin_(ids))
+    return db.session.query(q.exists()).scalar()
+
 
 def log_event(task_id, node_id, status, message):
     #Log task execution event followed by db.session.commit() in caller.
@@ -67,12 +105,7 @@ def allocate_task(task_id):
                 profile["disk"] = WORKSPACE_DISK_MB
 
         # Finding ELIGIBLE NODES — lock all candidates; peers wait instead of SKIP LOCKED → empty set
-        timeout_limit = datetime.now(timezone.utc) - timedelta(seconds=45)
-
-        nodes = Node.query.filter(
-            Node.status == 'online',
-            Node.last_heartbeat > timeout_limit
-        ).with_for_update(of=Node).all()
+        nodes = lock_online_nodes()
 
         # Browser devices ("WEB-...", from the Share this device page) can only be reserved
         # physically; remote (VM) sessions need a lab PC running the Python agent.
@@ -110,7 +143,7 @@ def allocate_task(task_id):
             TaskRequest.id != task_id
         ).all()
 
-        usage_map = {n_id: {"cpu": 0, "ram": 0, "disk": 0, "phys": 0, "rem": 0} for n_id in node_ids}
+        usage_map = {n_id: {"cpu": 0, "ram": 0, "disk": 0, "phys": 0, "rem": 0, "job": 0} for n_id in node_ids}
         for t in active_tasks:
             usage = usage_map[t.assigned_node_id]
             usage["cpu"] += (t.required_cpu or 0)
@@ -118,6 +151,7 @@ def allocate_task(task_id):
             usage["disk"] += (t.required_disk_mb or 0)
             if t.mode == "physical": usage["phys"] += 1
             if t.mode == "remote": usage["rem"] += 1
+            if t.mode == "job": usage["job"] += 1
 
         metrics = NodeMetrics.query.filter(
             NodeMetrics.node_id.in_(node_ids)
@@ -142,7 +176,9 @@ def allocate_task(task_id):
                     skipped.append(f"{node.name}: only {latest_metric.memory_free_mb:.0f} MB RAM free")
                     continue
             stats = usage_map[node.id]
-            task_count = stats["phys"] + stats["rem"]
+            # Jobs already piling onto this device count against it too - otherwise a node
+            # running several sandboxed jobs looked exactly as attractive as an idle one.
+            task_count = stats["phys"] + stats["rem"] + stats["job"]
             
             # Rule A: a physical reservation takes the whole device. Sandboxed work (jobs and
             # workspaces) only takes a slice, so several can share one device - but not while

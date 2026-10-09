@@ -35,6 +35,8 @@ NEW_COLUMNS = {
         ("result_blob_id", "INTEGER"),
         ("exit_code", "INTEGER"),
         ("output_tail", "TEXT"),
+        ("priority", "INTEGER DEFAULT 50"),
+        ("job_kind", "VARCHAR(20)"),
     ],
 }
 
@@ -48,7 +50,8 @@ def run_startup_migrations(db):
             for name, sqltype in cols:
                 conn.execute(text(f'ALTER TABLE public."{table}" ADD COLUMN IF NOT EXISTS {name} {sqltype}'))
         # The new tables hold private data; the browser (anon key) must never read them.
-        for table in ("device_enrollment", "pool_blob", "pool_file", "pool_chunk", "pool_replica"):
+        for table in ("device_enrollment", "pool_blob", "pool_file", "pool_chunk", "pool_replica",
+                      "node_metrics_history"):
             conn.execute(text(f'ALTER TABLE IF EXISTS public."{table}" ENABLE ROW LEVEL SECURITY'))
     # Two nodes must never share a device key (NULL is fine - unkeyed/legacy nodes have no key).
     # A separate transaction: if duplicate keys already exist from before this was added, log it
