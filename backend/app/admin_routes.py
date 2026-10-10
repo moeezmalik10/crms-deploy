@@ -4,7 +4,8 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone, timedelta
 from werkzeug.security import generate_password_hash
 from app import db
-from app.models import User, Node, NodeMetrics, TaskRequest, MLResult, TaskExecutionLog
+from app.models import (User, Node, NodeMetrics, NodeMetricsHistory, TaskRequest, MLResult,
+                       TaskExecutionLog, DeviceEnrollment, PoolBlob, PoolChunk, PoolFile, PoolReplica)
 from app.allocation_engine import stop_task
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
@@ -130,9 +131,57 @@ def delete_user(user_id):
     claims = get_jwt()
     if claims.get("role") != "admin":
         return jsonify({"error": "Admin access required"}), 403
-    
-    # User Deletion functionality
+
     user = User.query.get_or_404(user_id)
+
+    # Deleting a user used to throw a raw 500 (IntegrityError) the moment they had any
+    # history at all - every foreign key pointing at them has to be resolved first. What to
+    # do with each depends on what the data actually is, not just "delete everything":
+
+    # Pool files still mid-replication/mid-delete hold real encrypted copies on contributors'
+    # disks; deleting the row out from under that process would silently abandon those copies
+    # instead of letting devices clean up properly. Ask each to finish deleting first (the
+    # same path the student's own "Delete" button uses) and only proceed once none are left.
+    still_cleaning_up = []
+    for f in PoolFile.query.filter_by(owner_user_id=user.id).all():
+        f.status = "deleting"
+        for c in f.chunks:
+            for r in c.replicas:
+                if r.status == "pending":
+                    db.session.delete(r)
+                else:
+                    r.status = "deleting"
+        db.session.flush()
+        left = (PoolReplica.query.join(PoolChunk, PoolChunk.id == PoolReplica.chunk_id)
+                .filter(PoolChunk.file_id == f.id).count())
+        if left == 0:
+            for c in f.chunks:
+                if c.tmp_blob_id:
+                    PoolBlob.query.filter_by(id=c.tmp_blob_id).delete()
+            db.session.delete(f)
+        else:
+            still_cleaning_up.append(f.name)
+    if still_cleaning_up:
+        db.session.rollback()
+        return jsonify({"error": "Cannot delete yet - still cleaning up pool file(s): "
+                                 f"{', '.join(still_cleaning_up)}. Try again in a minute."}), 409
+
+    # This student's own task history - gone with them. A bulk delete() doesn't go through
+    # the ORM, so it would just trade this 500 for another one at the next foreign key
+    # (TaskExecutionLog.task_id is NOT NULL; MLResult.task_id has no cascade relationship
+    # declared at all) - clear those first.
+    task_ids = [t.id for t in TaskRequest.query.filter_by(user_id=user.id).all()]
+    if task_ids:
+        MLResult.query.filter(MLResult.task_id.in_(task_ids)).delete(synchronize_session=False)
+        TaskExecutionLog.query.filter(TaskExecutionLog.task_id.in_(task_ids)).delete(synchronize_session=False)
+        TaskRequest.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+    # One-time join codes are meaningless without the student who made them.
+    DeviceEnrollment.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+    # A contributed device is real hardware that keeps existing in the pool - orphan it
+    # (ownerless) rather than deleting the Node row, consistent with how /agent/join already
+    # treats an ownerless node.
+    Node.query.filter_by(owner_user_id=user.id).update({"owner_user_id": None}, synchronize_session=False)
+
     db.session.delete(user)
     db.session.commit()
     return jsonify({"message": "User deleted"})
@@ -212,18 +261,38 @@ def delete_node(node_id):
         return jsonify({"error": "Admin access required"}), 403
     
     node = Node.query.get_or_404(node_id)
-    
-    # Check for active tasks before allowing node deletion
-    active_task = TaskRequest.query.filter_by(assigned_node_id=node_id, status="running").first()
+
+    # Check for active tasks before allowing node deletion - "allocated"/"starting" too, not
+    # just "running": a task just assigned to this node (agent hasn't polled yet) would
+    # otherwise have its assigned_node_id orphaned by the delete below.
+    active_task = TaskRequest.query.filter(TaskRequest.assigned_node_id == node_id,
+                                           TaskRequest.status.in_(("running", "starting", "allocated"))).first()
     if active_task:
         return jsonify({"error": "Cannot delete node while a task is running"}), 400
 
-    #Delete associated metrics 
+    # Every other foreign key pointing at this node has to be resolved too, or this throws a
+    # raw 500 (IntegrityError) the moment the node has any history - it used to only check for
+    # a *running* task and otherwise delete the row unconditionally.
+
+    # Chunks this node was holding: just drop its replica rows. pool_storage_upkeep already
+    # self-heals a missing replica (asks the surviving copy to resend, places a new one
+    # elsewhere) - that is the normal "a device left the pool" path, reused here rather than
+    # duplicated.
+    PoolReplica.query.filter_by(node_id=node_id).delete(synchronize_session=False)
+    # Historical tasks keep their assigned_pc (the device name, already a text snapshot) so
+    # the history view still shows where they ran - just drop the dangling FK.
+    TaskRequest.query.filter_by(assigned_node_id=node_id).update({"assigned_node_id": None}, synchronize_session=False)
+    # Log messages already describe what happened in plain text; the FK is just bookkeeping.
+    TaskExecutionLog.query.filter_by(node_id=node_id).update({"node_id": None}, synchronize_session=False)
+    # A join code's "which node did this become" link is just bookkeeping too.
+    DeviceEnrollment.query.filter_by(node_id=node_id).update({"node_id": None}, synchronize_session=False)
+    # Metrics and their history have no meaning once the node is gone.
     NodeMetrics.query.filter_by(node_id=node_id).delete()
-    
+    NodeMetricsHistory.query.filter_by(node_id=node_id).delete()
+
     db.session.delete(node)
     db.session.commit()
-    
+
     return jsonify({"message": f"Node {node.name} removed successfully"}), 200
 
 def _last_reason(t):
