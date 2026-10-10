@@ -20,6 +20,18 @@ os.environ.setdefault("IDS_BASE", "")
 os.environ["DISABLE_SCHEDULER"] = "true"
 
 import pytest
+import sqlite3
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+# SQLAlchemy does not turn on sqlite's own foreign-key enforcement by default (unlike
+# Postgres, where it's always on) - without this, a test against sqlite would not reproduce
+# an IntegrityError that the real database raises, giving false confidence that a cascade/FK
+# bug is fixed when it was never actually exercised.
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, _):
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
 
 @pytest.fixture()
