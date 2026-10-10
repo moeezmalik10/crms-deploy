@@ -116,7 +116,10 @@ export default function NewRequests() {
 
       }
 
-      setMessage("Request submitted successfully");
+      const moved = data?.allocation?.consolidated || 0;
+      setMessage(moved > 0
+        ? `Request submitted successfully - ${moved} pool job${moved > 1 ? "s" : ""} moved to another device to make room for your session`
+        : "Request submitted successfully");
 
       // Reset form
       setAccessMode("");

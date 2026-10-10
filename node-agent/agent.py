@@ -171,6 +171,8 @@ def build_payload():
 # REGISTER NODE
 # =====================
 def register_node():
+    """Returns (ok, retryable). retryable=False means trying again won't help (e.g. a bad
+    device key) - the caller should stop looping instead of burning through its retries."""
     try:
         payload = {
             "name":         NODE_NAME,
@@ -183,15 +185,18 @@ def register_node():
         if r.status_code == 200 and "registered" in r.text:
             pool.apply_settings(r.json().get("settings"))
             print(f"[SUCCESS] Node {payload['name']} registered with {BACKEND_BASE_URL}")
-            return True
+            return True, False
         print(f"[FAILED] Register failed: HTTP {r.status_code} from {REGISTER_URL}: {r.text[:200]}")
         if r.status_code == 401:
             print("         This PC needs a device key: delete device_key.txt and join again from the website.")
-        else:
-            print("         Is backend_url.txt exactly your crms-backend address from Render?")
+            return False, False
+        print("         Is backend_url.txt exactly your crms-backend address from Render?")
     except Exception as e:
-        print(f"[FAILED] Register failed: {e}")
-    return False
+        # The common case on a free Render backend that's been asleep for 15+ minutes: the
+        # first few requests get a connection error or timeout while it wakes up, not a slow
+        # success - this is expected, not a misconfiguration, so it's worth retrying patiently.
+        print(f"[FAILED] Register failed: {e} (normal if the backend has been asleep - it wakes on its own)")
+    return False, True
 
 
 # =====================
@@ -748,10 +753,17 @@ if __name__ == "__main__":
     print(f"Pool storage : {pool.STORAGE_DIR}")
     print("=" * 40)
 
-    for attempt in range(1, 4):
-        if register_node():
+    # A free Render backend that's been idle for 15+ minutes takes "about a minute" to wake up
+    # (see DEPLOY_GUIDE.md) - 3 tries x 15s (45s total) wasn't quite enough margin, so this
+    # failed with the same 3 messages on nearly every cold start even though it would have
+    # succeeded moments later via the heartbeat loop anyway. 8 tries x 15s = 120s of patience.
+    MAX_REGISTER_ATTEMPTS = 8
+    for attempt in range(1, MAX_REGISTER_ATTEMPTS + 1):
+        ok, retryable = register_node()
+        if ok or not retryable:
             break
-        print(f"         retrying in 15 seconds ({attempt}/3)...")
+        print(f"         retrying in 15 seconds ({attempt}/{MAX_REGISTER_ATTEMPTS}) "
+              f"- the backend may just be waking up from sleep...")
         time.sleep(15)
 
     threading.Thread(target=heartbeat_loop,       daemon=True).start()

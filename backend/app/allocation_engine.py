@@ -29,6 +29,69 @@ def default_priority(mode):
     return PRIORITY_INTERACTIVE if mode in ("physical", "remote") else PRIORITY_BATCH
 
 
+def _consolidate(task, nodes, usage_map, active_tasks, profile):
+    """Per the proposal: "work that cannot be divided is placed on the PC that fits it best;
+    if no single PC has room, the system moves divisible work elsewhere to make room." Only
+    ever evicts "job"-mode tasks (divisible - they restart cleanly on whatever device picks
+    them up next) and never another physical/remote session, which is someone else's own
+    non-divisible work and must not be touched to make room for this one.
+
+    Only called once the normal scoring pass below already failed to find room as-is. Returns
+    (node, jobs_to_evict) for the cheapest fix found (fewest jobs moved), or (None, []) if no
+    node can be made to fit even by clearing every job off it. Disk capacity and the live
+    psutil-reported free-RAM safety check (both checked in the main scoring loop) are not
+    re-applied here - this handles the CPU/RAM case the proposal describes; a node blocked on
+    disk or a live low-memory reading is left for the admin/next cycle rather than guessed at.
+    """
+    if task.mode not in ("physical", "remote"):
+        return None, []
+
+    best_node, best_evict = None, None
+    for node in nodes:
+        stats = usage_map[node.id]
+        jobs_here = sorted(
+            (t for t in active_tasks if t.assigned_node_id == node.id and t.mode == "job"),
+            key=lambda t: -(t.required_ram_mb or 0))   # evict the biggest first - fewest moves
+        if not jobs_here:
+            continue   # nothing divisible here to move - eviction can't help this node
+
+        other_session = any(t.assigned_node_id == node.id and t.mode in ("physical", "remote")
+                            for t in active_tasks)
+        if other_session and (task.mode == "physical" or stats["phys"] >= 1):
+            continue   # someone else's session - not ours to move, physical needs the whole PC
+
+        total_ram, total_cores = node.total_ram_mb or 0, node.total_cores or 0
+
+        if task.mode == "physical":
+            # Rule A (main loop) blocks physical placement on ANY busy device, job or not, so
+            # every job here must go - not just enough of them to free up some numbers. But
+            # the device still has to be big enough once it's entirely clear.
+            cap_cpu, cap_ram = total_cores - total_cores * 0.05, total_ram - 768
+            if cap_cpu < profile["cpu"] or cap_ram < profile["ram"]:
+                continue   # empty or not, this device is simply too small for the session
+            to_evict = jobs_here
+        else:
+            cap_cpu, cap_ram = total_cores - total_cores * 0.05, total_ram - 768
+            if node.share_cores: cap_cpu = min(cap_cpu, node.share_cores)
+            if node.share_ram_mb: cap_ram = min(cap_ram, node.share_ram_mb)
+
+            cpu_used, ram_used, to_evict = stats["cpu"], stats["ram"], []
+            fits = cap_cpu - cpu_used >= profile["cpu"] and cap_ram - ram_used >= profile["ram"]
+            for j in jobs_here:
+                if fits:
+                    break
+                cpu_used -= (j.required_cpu or 0)
+                ram_used -= (j.required_ram_mb or 0)
+                to_evict.append(j)
+                fits = cap_cpu - cpu_used >= profile["cpu"] and cap_ram - ram_used >= profile["ram"]
+            if not fits:
+                continue
+
+        if best_evict is None or len(to_evict) < len(best_evict):
+            best_node, best_evict = node, to_evict
+    return best_node, (best_evict or [])
+
+
 def lock_online_nodes():
     """Online, recently-heard-from nodes, locked for the rest of this transaction. Every path
     that decides where resource-pool work lands - compute tasks here, ML chunks in
@@ -270,6 +333,12 @@ def allocate_task(task_id):
                     highest_score = score
                     best_node = node
 
+        # CONSOLIDATION: no PC had room as-is for this non-divisible session - see if moving
+        # some divisible job(s) off one PC would make room there instead of queuing the session.
+        consolidated_evictions = []
+        if not best_node:
+            best_node, consolidated_evictions = _consolidate(task, nodes, usage_map, active_tasks, profile)
+
         # EXECUTE ALLOCATION
         if not best_node:
             task.status = "pending"
@@ -278,6 +347,13 @@ def allocate_task(task_id):
             db.session.commit()
             return {"status": "pending"}
 
+        for j in consolidated_evictions:
+            j.status = "pending"
+            j.assigned_node_id = None
+            j.assigned_pc = None
+            j.message = f"Re-queued: moved off {best_node.name} to make room for task {task.id}'s {task.mode} session"
+            log_event(j.id, None, "pending", j.message)
+
         task.assigned_node_id = best_node.id
         task.assigned_pc = best_node.name
         task.required_cpu = profile["cpu"]
@@ -285,16 +361,22 @@ def allocate_task(task_id):
         if profile.get("disk"):
             task.required_disk_mb = profile["disk"]
         task.status = "allocated" # Waiting for Agent to start
-        
-        log_event(task.id, best_node.id, "allocated", f"Assigned to {best_node.name}")
-        
+
+        if consolidated_evictions:
+            log_event(task.id, best_node.id, "allocated",
+                     f"Assigned to {best_node.name} after moving {len(consolidated_evictions)} "
+                     f"job(s) elsewhere to make room")
+        else:
+            log_event(task.id, best_node.id, "allocated", f"Assigned to {best_node.name}")
+
         # Atomic commit: All logs + Task updates + Node lock release
         db.session.commit()
 
         return {
             "status": "allocated",
             "assigned_machine": best_node.name,
-            "mode": task.mode
+            "mode": task.mode,
+            "consolidated": len(consolidated_evictions),
         }
 
     except Exception as e:
