@@ -388,8 +388,8 @@ def submit_job():
             return default
 
     kind = (request.form.get("kind") or "").strip().lower()
-    if kind not in ("", "sweep"):
-        return jsonify({"error": "kind must be empty (custom) or 'sweep'"}), 400
+    if kind not in ("", "sweep", "kfold"):
+        return jsonify({"error": "kind must be empty (custom), 'sweep', or 'kfold'"}), 400
 
     param_sets = None
     if kind == "sweep":
@@ -399,6 +399,8 @@ def submit_job():
         if len(param_sets) > MAX_PARTS:
             return jsonify({"error": f"a parameter sweep supports at most {MAX_PARTS} parameter sets"}), 400
         parts = len(param_sets)   # one part per parameter set, not a separately chosen count
+    elif kind == "kfold":
+        parts = int(num("parts", 2, MAX_PARTS, 5))   # parts = k (the number of folds)
     else:
         parts = int(num("parts", 1, MAX_PARTS, 1))
 
@@ -410,7 +412,16 @@ def submit_job():
             return jsonify({"error": "data file is larger than 10 MB"}), 400
         data_name = os.path.basename(dfile.filename)
         header = request.form.get("header", "1") not in ("0", "false", "off")
-        data_parts = _split_lines(raw, parts, header) if parts > 1 else [raw]
+        if kind == "kfold":
+            # k-fold needs the WHOLE dataset in every part, not a row-sliced chunk - each
+            # part does its own internal split (e.g. sklearn's KFold) to hold out its own
+            # fold and train on the rest. Row-sharding would give each part a fold to
+            # validate on but nothing to train on.
+            data_parts = [raw] * parts
+        else:
+            data_parts = _split_lines(raw, parts, header) if parts > 1 else [raw]
+    elif kind == "kfold":
+        return jsonify({"error": "k-fold cross-validation needs a data file"}), 400
 
     quota_error = job_quota_message(user.id)
     if quota_error:
@@ -447,8 +458,12 @@ def submit_job():
         return jsonify({"job": _job_json(TaskRequest.query.get(task.id)), "allocation": result})
 
     # Split job: a group with one part per device
-    group_message = (f"Parameter sweep over {parts} parameter sets" if kind == "sweep"
-                     else f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else ""))
+    if kind == "sweep":
+        group_message = f"Parameter sweep over {parts} parameter sets"
+    elif kind == "kfold":
+        group_message = f"{parts}-fold cross-validation"
+    else:
+        group_message = f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else "")
     group = TaskRequest(mode="job_group", status="group", created_at=now, chunk_id=parts,
                         message=group_message, **common)
     db.session.add(group)
@@ -475,10 +490,11 @@ def submit_job():
     return jsonify({"job": _group_json(TaskRequest.query.get(group.id)), "allocation": allocations})
 
 
-def _sweep_scores(kids):
-    """{chunk_id: score} for a parameter-sweep group's parts. Each part's program is expected
-    to write output/result.json with a numeric "score" field - that file lands at the result
-    zip's root (pool_runtime.run_job flattens the job's own output/ folder into the zip)."""
+def _job_scores(kids):
+    """{chunk_id: score} for a defined-job-type group's parts (parameter sweep or k-fold).
+    Each part's program is expected to write output/result.json with a numeric "score" field -
+    that file lands at the result zip's root (pool_runtime.run_job flattens the job's own
+    output/ folder into the zip)."""
     scores = {}
     for c in kids:
         if c.status != "completed" or not c.result_blob_id:
@@ -534,12 +550,18 @@ def _group_json(g):
         "kind": g.job_kind,
     }
     if g.job_kind == "sweep" and status == "completed":
-        scores = _sweep_scores(kids)
+        scores = _job_scores(kids)
         if scores:
             best_chunk = max(scores, key=scores.get)
             j["best_part"] = best_chunk
             j["best_score"] = scores[best_chunk]
             j["best_args"] = next((c.job_args for c in kids if c.chunk_id == best_chunk), None)
+    elif g.job_kind == "kfold" and status == "completed":
+        scores = _job_scores(kids)
+        if scores:
+            j["fold_scores"] = [scores.get(c.chunk_id) for c in kids]
+            j["average_score"] = sum(scores.values()) / len(scores)
+            j["folds_scored"] = len(scores)
     return j
 
 
@@ -594,7 +616,7 @@ def _group_result(g):
                 merged += p.decode("utf-8", errors="replace").splitlines(keepends=True)[1:]
             files[f"merged/{n}"] = "".join(merged).encode("utf-8")
     if g.job_kind == "sweep":
-        scores = _sweep_scores(kids)
+        scores = _job_scores(kids)
         if scores:
             best_chunk = max(scores, key=scores.get)
             best = next(c for c in kids if c.chunk_id == best_chunk)
@@ -606,6 +628,21 @@ def _group_result(g):
         else:
             summary.append("")
             summary.append("Parameter sweep: no part reported a usable output/result.json score.")
+    elif g.job_kind == "kfold":
+        scores = _job_scores(kids)
+        if scores:
+            average = sum(scores.values()) / len(scores)
+            summary.append("")
+            summary.append(f"{len(kids)}-fold cross-validation: average score {average} "
+                           f"over {len(scores)} fold(s)")
+            for c in kids:
+                if c.chunk_id in scores:
+                    summary.append(f"  fold {c.chunk_id}: {scores[c.chunk_id]}")
+            files["average_result.json"] = json.dumps(
+                {"average_score": average, "fold_scores": scores}).encode("utf-8")
+        else:
+            summary.append("")
+            summary.append("k-fold cross-validation: no fold reported a usable output/result.json score.")
     files["summary.txt"] = "\n".join(summary).encode("utf-8")
     return Response(_make_zip(files), mimetype="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="job_{g.id}_all_parts.zip"'})
