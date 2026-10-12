@@ -43,6 +43,9 @@ export default function Jobs() {
     if (kind === "sweep" && paramSets.trim().split("\n").filter((s) => s.trim()).length < 2) {
       return setErr("A parameter sweep needs at least 2 parameter sets, one per line.");
     }
+    if (kind === "kfold" && !data) {
+      return setErr("k-fold cross-validation needs a data file - every fold gets the whole thing.");
+    }
     setBusy(true); setErr("");
     const fd = new FormData();
     fd.append("file", file);
@@ -50,6 +53,9 @@ export default function Jobs() {
     if (kind === "sweep") {
       fd.append("kind", "sweep");
       fd.append("param_sets", paramSets);
+    } else if (kind === "kfold") {
+      fd.append("kind", "kfold");
+      fd.append("parts", parts);
     } else {
       fd.append("parts", parts);
     }
@@ -107,10 +113,16 @@ export default function Jobs() {
             <Field label="Disk (MB)"><input type="number" min="50" step="50" value={form.disk_mb} onChange={set("disk_mb")} /></Field>
             <Field label="Time limit (minutes)"><input type="number" min="1" max="240" value={form.max_minutes} onChange={set("max_minutes")} /></Field>
           </div>
-          <Field label="Job type" hint="A sweep runs a different parameter set per device and keeps the best score">
-            <select value={kind} onChange={(e) => setKind(e.target.value)}>
+          <Field label="Job type" hint="A sweep runs a different parameter set per device and keeps the best score; k-fold trains on each fold and averages the scores">
+            <select value={kind} onChange={(e) => {
+              const k = e.target.value;
+              setKind(k);
+              if (k === "kfold" && parts < 2) setParts(5);
+              if (k === "" && parts < 1) setParts(1);
+            }}>
               <option value="">Custom - run my own code</option>
               <option value="sweep">Parameter sweep - try several parameter sets at once</option>
+              <option value="kfold">k-fold cross-validation - train/validate on k folds, average the scores</option>
             </select>
           </Field>
           {kind === "sweep" ? (
@@ -119,6 +131,17 @@ export default function Jobs() {
               <textarea rows={4} placeholder={"--lr 0.01 --depth 3\n--lr 0.1 --depth 5\n--lr 0.05 --depth 4"}
                         value={paramSets} onChange={(e) => setParamSets(e.target.value)} />
             </Field>
+          ) : kind === "kfold" ? (
+            <div className="split">
+              <Field label="Number of folds (k)" hint={ready == null ? "" : `${ready} ${ready === 1 ? "device" : "devices"} can run jobs right now`}>
+                <select value={parts} onChange={(e) => setParts(Number(e.target.value))}>
+                  {[2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n} folds, on {n} devices</option>)}
+                </select>
+              </Field>
+              <Field label="Data file (required)" hint="Every fold gets the whole file - your program does its own k-fold split internally">
+                <input ref={dataRef} type="file" accept=".csv,.txt,.tsv,.jsonl" onChange={(e) => setData(e.target.files[0] || null)} />
+              </Field>
+            </div>
           ) : (
             <div className="split">
               <Field label="Split across devices" hint={ready == null ? "" : `${ready} ${ready === 1 ? "device" : "devices"} can run jobs right now`}>
@@ -136,13 +159,21 @@ export default function Jobs() {
               </label>
             </div>
           )}
-          {kind !== "sweep" && parts > 1 && (
+          {kind === "" && parts > 1 && (
             <p className="small muted" style={{ margin: 0, maxWidth: "80ch" }}>
               Each part runs at the same time on a different device, with the cores and memory above <b>per part</b>.
               Your program reads <code>CRMS_PART</code> and <code>CRMS_PARTS</code> (e.g. part 2 of {parts}) or simply
               processes the data slice it was given. CSV files the parts write to <b>output</b> are joined back into one.
               Splitting pays off when the job takes more than about a minute; each part needs a few seconds to start.
               {ready != null && parts > ready && <span style={{ color: "var(--warn)" }}> Only {ready} can run now, so some parts will wait or share a device.</span>}
+            </p>
+          )}
+          {kind === "kfold" && (
+            <p className="small muted" style={{ margin: 0, maxWidth: "80ch" }}>
+              Each fold runs at the same time on a different device, with the whole dataset. Your program reads
+              <code> CRMS_PART</code> and <code>CRMS_PARTS</code> (e.g. fold 2 of {parts}) to hold out its own fold,
+              trains on the rest, and writes <code>output/result.json</code> with a numeric <code>score</code>. The
+              job's result is the <b>average</b> score across all {parts} folds.
             </p>
           )}
           {kind === "sweep" && (
@@ -173,8 +204,10 @@ export default function Jobs() {
                           <div className="row">
                             <b>#{j.id} {j.entry}</b><span className={cls}>{label}</span>
                             {j.kind === "sweep" && <span className="chip">parameter sweep</span>}
+                            {j.kind === "kfold" && <span className="chip">{j.parts?.length || "k"}-fold cross-validation</span>}
                             {j.group && <span className="chip">{j.parts_done}/{j.parts.length} parts finished</span>}
                             {j.best_part != null && <span className="chip good">best: part {j.best_part}, score {j.best_score}</span>}
+                            {j.average_score != null && <span className="chip good">average score: {j.average_score.toFixed(4)} ({j.folds_scored} fold{j.folds_scored === 1 ? "" : "s"})</span>}
                             {j.exit_code != null && <span className="small muted">exit code {j.exit_code}</span>}
                           </div>
                           <div className="small muted" style={{ marginTop: 4 }}>
