@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from app import db
-from sqlalchemy import event
+from sqlalchemy import CheckConstraint, event
 
 # =========================
 # USERS (Frontend login & history)
@@ -64,10 +64,29 @@ class Node(db.Model):
     sandbox_mode = db.Column(db.String(20))         # docker / light / none, reported by the agent
     agent_version = db.Column(db.String(20))
 
+    # ---- Unified Quota Ledger (see app.allocation_engine.refresh_ledger) ----
+    # "used" = booked by tasks that are actually running; "reserved" = promised to tasks that
+    # are allocated/starting but not running yet. Kept as a persisted, DB-constrained mirror of
+    # the live computation in compute_node_usage() - never written anywhere else, so the two
+    # can't drift apart. A physical session books the node's FULL total here (Rule A gives it
+    # the whole device), not just its own modest profile.
+    used_cores = db.Column(db.Float, default=0.0, nullable=False)
+    used_ram_mb = db.Column(db.Float, default=0.0, nullable=False)
+    reserved_cores = db.Column(db.Float, default=0.0, nullable=False)
+    reserved_ram_mb = db.Column(db.Float, default=0.0, nullable=False)
+
     metrics = db.relationship("NodeMetrics", backref="node", lazy=True)
     tasks = db.relationship("TaskRequest", backref="assigned_node", lazy=True)
     # Link for easier log auditing
     logs = db.relationship("TaskExecutionLog", backref="node", lazy=True)
+
+    __table_args__ = (
+        # A small epsilon absorbs float rounding, not real over-booking. Defined here (not only
+        # in the Postgres migration) so SQLite test databases enforce it too - a constraint only
+        # a live migration adds is a constraint the test suite can never actually exercise.
+        CheckConstraint("used_cores + reserved_cores <= total_cores + 0.01", name="ck_node_cores_ledger"),
+        CheckConstraint("used_ram_mb + reserved_ram_mb <= total_ram_mb + 0.5", name="ck_node_ram_ledger"),
+    )
 
 # =========================
 # NODE METRICS (Heartbeat history for Agent)
@@ -151,7 +170,12 @@ class TaskRequest(db.Model):
     priority = db.Column(db.Integer, default=50)
 
     status = db.Column(db.String(20), default="pending")
-    assigned_pc = db.Column(db.String(100)) 
+    # Set each time this task (re-)enters "allocated"; cleared on requeue. Unlike created_at
+    # (fixed at submission), this tracks the current attempt, so the stale-"starting"/
+    # stale-"allocated" sweeps in app.tasks don't mistake "submitted a while ago" for
+    # "stuck on this attempt" and bounce a freshly-requeued task straight back to pending.
+    allocated_at = db.Column(db.DateTime(timezone=True))
+    assigned_pc = db.Column(db.String(100))
     link = db.Column(db.String(255))    
     vm_username = db.Column(db.String(100)) 
     vm_password = db.Column(db.String(100)) 

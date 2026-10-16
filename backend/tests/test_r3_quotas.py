@@ -1,5 +1,11 @@
 """app.quotas - one source of truth for session/job quotas, replacing two ad-hoc guards
-that used to drift apart (see app/quotas.py's module docstring)."""
+that used to drift apart (see app/quotas.py's module docstring).
+
+NOTE: _lock_user()'s with_for_update() is exercised here only for single-request behavior.
+SQLite has no row-level locking, so the race it closes (two submissions from the same student
+arriving together, each COUNT()-ing before either commits) is NOT proven by anything in this
+file - that needs a real Postgres instance, same limitation as test_r3_ledger.py.
+"""
 import io
 
 

@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 from flask import Blueprint, Response, g, jsonify, request
 
 from app import db
-from app.allocation_engine import allocate_task, log_event
+from app.allocation_engine import allocate_task, log_event, refresh_ledger
 from app.models import DeviceEnrollment, Node, PoolBlob, PoolChunk, PoolFile, PoolReplica, TaskRequest
 from app.pool_security import agent_auth, new_device_key, sha256_hex, client_public_ip
 
@@ -101,6 +101,9 @@ def job_result(task_id):
     if task.status not in ("running", "starting"):
         return jsonify({"status": "ignored", "reason": f"job is {task.status}"}), 200
 
+    # Lock the node row before touching its ledger columns, same discipline as allocate_task.
+    Node.query.with_for_update().get(g.node.id)
+
     exit_code = request.form.get("exit_code", type=int)
     reason = (request.form.get("reason") or "").strip()
     task.exit_code = exit_code
@@ -123,6 +126,7 @@ def job_result(task_id):
     msg = f"Job finished on {g.node.name} (exit code {exit_code})" + (f": {reason}" if reason else "")
     task.message = msg
     log_event(task.id, g.node.id, task.status, msg)
+    refresh_ledger([g.node.id])
     db.session.commit()
 
     # The device has room again: hand it the next waiting part of a split job straight

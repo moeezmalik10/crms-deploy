@@ -37,21 +37,27 @@ def process_queue():
 def cleanup_system():
     with scheduler.app.app_context():
         now = datetime.now(timezone.utc)
-        # Requeue tasks that were handed to an agent but never acknowledged as ready.
-        # This prevents jobs getting stuck in "starting" if an agent goes offline/crashes.
-        stale_starting_limit = now - timedelta(minutes=5)
-        stale_starting = TaskRequest.query.filter(
-            TaskRequest.status == "starting",
-            TaskRequest.created_at < stale_starting_limit
+        # Requeue tasks that were handed to an agent but never acknowledged as ready, or that
+        # were allocated but never even polled for. Keyed off allocated_at (set fresh on every
+        # (re-)allocation - see allocate_task), not created_at: a job can be legitimately
+        # requeued and reallocated many times over its life, and created_at never moves, so
+        # keying this off created_at would bounce any job older than 5 minutes straight back to
+        # pending the instant it next reaches "starting" - a real ping-pong bug this replaces.
+        stale_limit = now - timedelta(minutes=5)
+        stale = TaskRequest.query.filter(
+            TaskRequest.status.in_(["allocated", "starting"]),
+            db.or_(TaskRequest.allocated_at.is_(None), TaskRequest.allocated_at < stale_limit)
         ).all()
-        for task in stale_starting:
+        for task in stale:
             if "ml" in (task.task_type or ""):
                 continue
+            was = task.status
             task.status = "pending"
             task.assigned_node_id = None   # let the queue place it on any node again
             task.assigned_pc = None
-            task.message = "Re-queued after starting timeout (agent did not acknowledge ready)."
-            print(f"Task {task.id} re-queued after starting timeout.")
+            task.allocated_at = None
+            task.message = f"Re-queued after {was} timeout (agent did not respond)."
+            print(f"Task {task.id} re-queued after allocation timeout.")
 
         # Fail tasks on 'Ghost Nodes' (Agent stopped heartbeating)
         timeout_limit = now - timedelta(seconds=60)

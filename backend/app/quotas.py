@@ -4,7 +4,7 @@ Limits are read from the environment so an admin can tune them without a code ch
 """
 import os
 
-from app.models import TaskRequest
+from app.models import TaskRequest, User
 
 # A task counts against a quota from the moment it's queued until it finishes - not just
 # while it's actually running - otherwise two requests submitted back to back would both
@@ -39,8 +39,21 @@ def active_job_count(user_id):
     return singles + groups
 
 
+def _lock_user(user_id):
+    """Lock the requesting student's own User row for the rest of this transaction - the
+    Unified Quota Ledger's "quota row of the requesting student" (there's no separate
+    per-student table; the user's own row stands in for it). Without this, two submissions
+    from the same student arriving together can each COUNT() before either commits and both
+    read the same under-the-limit number, so both pass. The caller's route must go on to
+    commit (or roll back) this same transaction promptly - holding the lock any longer than
+    that blocks the student's own next request, not anyone else's, since each student only
+    ever locks their own row."""
+    User.query.with_for_update().get(user_id)
+
+
 def session_quota_message(user_id):
     """None if the user may start another session, otherwise an error string."""
+    _lock_user(user_id)
     if active_session_count(user_id) >= MAX_ACTIVE_SESSIONS:
         return f"You already have an active session (limit {MAX_ACTIVE_SESSIONS})."
     return None
@@ -48,6 +61,7 @@ def session_quota_message(user_id):
 
 def job_quota_message(user_id):
     """None if the user may submit another job, otherwise an error string."""
+    _lock_user(user_id)
     if active_job_count(user_id) >= MAX_ACTIVE_JOBS:
         return f"You already have {MAX_ACTIVE_JOBS} jobs waiting or running."
     return None
