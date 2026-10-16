@@ -386,8 +386,8 @@ def submit_job():
             return default
 
     kind = (request.form.get("kind") or "").strip().lower()
-    if kind not in ("", "sweep", "kfold", "rf"):
-        return jsonify({"error": "kind must be empty (custom), 'sweep', 'kfold', or 'rf'"}), 400
+    if kind not in ("", "sweep", "kfold", "rf", "compile_test"):
+        return jsonify({"error": "kind must be empty (custom), 'sweep', 'kfold', 'rf', or 'compile_test'"}), 400
 
     cores = int(num("cores", 1, 16, 1))
     ram_mb = num("ram_mb", 128, 32768, 1024)
@@ -436,6 +436,8 @@ def submit_job():
         return jsonify({"error": "k-fold cross-validation needs a data file"}), 400
     elif kind == "rf":
         return jsonify({"error": "Random Forest training needs a data file"}), 400
+    elif kind == "compile_test":
+        return jsonify({"error": "batch compile-and-test needs a data file listing the test cases"}), 400
 
     quota_error = job_quota_message(user.id)
     if quota_error:
@@ -478,6 +480,8 @@ def submit_job():
         group_message = f"{parts}-fold cross-validation"
     elif kind == "rf":
         group_message = f"Random Forest training across {parts} tree groups"
+    elif kind == "compile_test":
+        group_message = f"Batch compile-and-test across {parts} parts; test cases split by rows"
     else:
         group_message = f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else "")
     group = TaskRequest(mode="job_group", status="group", created_at=now, chunk_id=parts,
@@ -554,6 +558,32 @@ def _job_trees(kids):
     return trees
 
 
+def _job_reports(kids):
+    """{chunk_id: {"passed": int, "failed": int, "tests": [...]}} for a batch compile-and-test
+    group's parts. Each part's program is expected to write output/result.json with "passed"
+    and "failed" counts and a "tests" array (whatever per-test detail it wants to report -
+    CRMS only sums the counts and concatenates the array, same JSON-only rule as _job_trees)."""
+    reports = {}
+    for c in kids:
+        if c.status != "completed" or not c.result_blob_id:
+            continue
+        blob = PoolBlob.query.get(c.result_blob_id)
+        if not blob:
+            continue
+        try:
+            raw = _read_zip(blob.data).get("result.json")
+            if raw is None:
+                continue
+            data = json.loads(raw)
+            passed, failed = data.get("passed"), data.get("failed")
+            if isinstance(passed, int) and isinstance(failed, int):
+                reports[c.chunk_id] = {"passed": passed, "failed": failed,
+                                       "tests": data.get("tests") if isinstance(data.get("tests"), list) else []}
+        except Exception:
+            continue
+    return reports
+
+
 def _group_json(g):
     kids = sorted(g.sub_tasks, key=lambda c: c.chunk_id or 0)
     states = [c.status for c in kids]
@@ -609,6 +639,13 @@ def _group_json(g):
             j["tree_counts"] = {c.chunk_id: len(trees[c.chunk_id]) for c in kids if c.chunk_id in trees}
             j["trees_total"] = sum(len(t) for t in trees.values())
             j["groups_merged"] = len(trees)
+    elif g.job_kind == "compile_test" and status == "completed":
+        reports = _job_reports(kids)
+        if reports:
+            j["tests_passed"] = sum(r["passed"] for r in reports.values())
+            j["tests_failed"] = sum(r["failed"] for r in reports.values())
+            j["tests_total"] = j["tests_passed"] + j["tests_failed"]
+            j["all_passed"] = j["tests_failed"] == 0
     return j
 
 
@@ -707,6 +744,27 @@ def _group_result(g):
         else:
             summary.append("")
             summary.append("Random Forest training: no tree group reported a usable output/result.json.")
+    elif g.job_kind == "compile_test":
+        reports = _job_reports(kids)
+        if reports:
+            total_passed = sum(r["passed"] for r in reports.values())
+            total_failed = sum(r["failed"] for r in reports.values())
+            combined_tests = []
+            for c in kids:   # original part order
+                if c.chunk_id in reports:
+                    combined_tests.extend(reports[c.chunk_id]["tests"])
+            summary.append("")
+            summary.append(f"Batch compile-and-test: {total_passed} passed, {total_failed} failed, "
+                           f"across {len(reports)} of {len(kids)} part(s)")
+            for c in kids:
+                if c.chunk_id in reports:
+                    r = reports[c.chunk_id]
+                    summary.append(f"  part {c.chunk_id}: {r['passed']} passed, {r['failed']} failed")
+            files["combined_report.json"] = json.dumps(
+                {"passed": total_passed, "failed": total_failed, "tests": combined_tests}).encode("utf-8")
+        else:
+            summary.append("")
+            summary.append("Batch compile-and-test: no part reported a usable output/result.json.")
     files["summary.txt"] = "\n".join(summary).encode("utf-8")
     return Response(_make_zip(files), mimetype="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="job_{g.id}_all_parts.zip"'})
