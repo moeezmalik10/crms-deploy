@@ -25,6 +25,10 @@ NEW_COLUMNS = {
         ("allow_light_sandbox", "BOOLEAN DEFAULT FALSE"),
         ("sandbox_mode", "VARCHAR(20)"),
         ("agent_version", "VARCHAR(20)"),
+        ("used_cores", "DOUBLE PRECISION DEFAULT 0 NOT NULL"),
+        ("used_ram_mb", "DOUBLE PRECISION DEFAULT 0 NOT NULL"),
+        ("reserved_cores", "DOUBLE PRECISION DEFAULT 0 NOT NULL"),
+        ("reserved_ram_mb", "DOUBLE PRECISION DEFAULT 0 NOT NULL"),
     ],
     "task_request": [
         ("required_disk_mb", "DOUBLE PRECISION"),
@@ -37,8 +41,17 @@ NEW_COLUMNS = {
         ("output_tail", "TEXT"),
         ("priority", "INTEGER DEFAULT 50"),
         ("job_kind", "VARCHAR(20)"),
+        ("allocated_at", "TIMESTAMPTZ"),
     ],
 }
+
+# (table, constraint name, check expression) - added in their own try/except below, after the
+# columns above exist. Every existing row already has used/reserved = 0 from the column
+# defaults, so the constraint holds immediately; no backfill or NOT VALID needed.
+NEW_CHECK_CONSTRAINTS = [
+    ("node", "ck_node_cores_ledger", "used_cores + reserved_cores <= total_cores + 0.01"),
+    ("node", "ck_node_ram_ledger", "used_ram_mb + reserved_ram_mb <= total_ram_mb + 0.5"),
+]
 
 
 def run_startup_migrations(db):
@@ -64,3 +77,18 @@ def run_startup_migrations(db):
             ))
     except Exception as e:
         print(f"WARNING: could not enforce unique device keys (likely duplicates already exist): {e}")
+
+    # Postgres has no "ADD CONSTRAINT IF NOT EXISTS", and re-adding a constraint that already
+    # exists raises - so each one gets its own transaction and is skipped (not fatal) if it's
+    # already there or if some row genuinely violates it, same precedent as the index above. A
+    # failure here must never stop the backend from booting.
+    for table, name, expr in NEW_CHECK_CONSTRAINTS:
+        try:
+            with engine.begin() as conn:
+                exists = conn.execute(text(
+                    "SELECT 1 FROM pg_constraint WHERE conname = :name"
+                ), {"name": name}).first()
+                if not exists:
+                    conn.execute(text(f'ALTER TABLE public."{table}" ADD CONSTRAINT {name} CHECK ({expr})'))
+        except Exception as e:
+            print(f"WARNING: could not add constraint {name} on {table} (existing rows may violate it): {e}")

@@ -15,8 +15,8 @@ from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from sqlalchemy import func
 
 from app import db
-from app.allocation_engine import (PRIORITY_BATCH, allocate_task, higher_or_equal_priority_pending,
-                                   log_event, release_node_tasks, stop_task)
+from app.allocation_engine import (PRIORITY_BATCH, allocate_task, compute_node_usage, fitting_device_count,
+                                   higher_or_equal_priority_pending, log_event, release_node_tasks, stop_task)
 from app.models import (DeviceEnrollment, Node, NodeMetrics, NodeMetricsHistory, PoolBlob, PoolChunk,
                         PoolFile, PoolReplica, TaskExecutionLog, TaskRequest, User)
 from app.pool_security import (decrypt_chunk, encrypt_chunk, new_file_key, new_join_code,
@@ -194,31 +194,29 @@ def ledger():
     """What the pool manager actually tracks per device: installed capacity, what is
     currently promised to a task that hasn't started yet ("reserved"), and what is actually
     running ("in_use") - the three-way split the proposal's pool manager is built around,
-    instead of a single free/used number."""
+    instead of a single free/used number. Reads compute_node_usage() - the same function
+    allocate_task scores against and refresh_ledger persists onto the Node row - so this view
+    can never show a different "reserved"/"in_use" split than what the scheduler itself is
+    using to place work."""
     _, role = _me()
     if role != "admin":
         return jsonify({"error": "Admin access required"}), 403
     nodes = Node.query.filter(Node.device_key_hash.isnot(None)).all()
     node_ids = [n.id for n in nodes]
-    active = TaskRequest.query.filter(
-        TaskRequest.assigned_node_id.in_(node_ids),
-        TaskRequest.status.in_(("allocated", "starting", "running")),
-    ).all() if node_ids else []
-    by_node = {n_id: {"reserved_cpu": 0, "reserved_ram_mb": 0, "in_use_cpu": 0, "in_use_ram_mb": 0} for n_id in node_ids}
-    for t in active:
-        bucket = "in_use" if t.status == "running" else "reserved"   # allocated/starting = promised, not started
-        by_node[t.assigned_node_id][f"{bucket}_cpu"] += (t.required_cpu or 0)
-        by_node[t.assigned_node_id][f"{bucket}_ram_mb"] += (t.required_ram_mb or 0)
+    usage_map = compute_node_usage(node_ids) if node_ids else {}
     out = []
     for n in nodes:
-        row = by_node[n.id]
+        stats = usage_map.get(n.id, {})
+        reserved_cpu, reserved_ram = stats.get("reserved_cpu", 0), stats.get("reserved_ram", 0)
+        in_use_cpu, in_use_ram = stats.get("used_cpu", 0), stats.get("used_ram", 0)
         out.append({
             "id": n.id, "name": n.name, "state": node_state(n),
             "installed_cpu": n.total_cores, "installed_ram_mb": n.total_ram_mb,
             "shared_cpu": n.share_cores, "shared_ram_mb": n.share_ram_mb,
-            **row,
-            "free_cpu": max(0, (n.share_cores or n.total_cores or 0) - row["reserved_cpu"] - row["in_use_cpu"]),
-            "free_ram_mb": max(0, (n.share_ram_mb or n.total_ram_mb or 0) - row["reserved_ram_mb"] - row["in_use_ram_mb"]),
+            "reserved_cpu": reserved_cpu, "reserved_ram_mb": reserved_ram,
+            "in_use_cpu": in_use_cpu, "in_use_ram_mb": in_use_ram,
+            "free_cpu": max(0, (n.share_cores or n.total_cores or 0) - reserved_cpu - in_use_cpu),
+            "free_ram_mb": max(0, (n.share_ram_mb or n.total_ram_mb or 0) - reserved_ram - in_use_ram),
         })
     return jsonify(out)
 
@@ -391,6 +389,9 @@ def submit_job():
     if kind not in ("", "sweep", "kfold"):
         return jsonify({"error": "kind must be empty (custom), 'sweep', or 'kfold'"}), 400
 
+    cores = int(num("cores", 1, 16, 1))
+    ram_mb = num("ram_mb", 128, 32768, 1024)
+
     param_sets = None
     if kind == "sweep":
         param_sets = [s for s in (request.form.get("param_sets") or "").splitlines() if s.strip()]
@@ -403,6 +404,14 @@ def submit_job():
         parts = int(num("parts", 2, MAX_PARTS, 5))   # parts = k (the number of folds)
     else:
         parts = int(num("parts", 1, MAX_PARTS, 1))
+        if parts > 1:
+            # Per the proposal: a divisible job's units are sized from each PC's free memory
+            # (the Unified Quota Ledger), not just however many parts the student asked for -
+            # don't create more parts than the pool can currently actually place. Sweep and
+            # k-fold are left alone: their part count is fixed by what they mean (one parameter
+            # set, one fold), not a capacity choice.
+            fitting = fitting_device_count(cores, ram_mb)
+            parts = max(1, min(parts, fitting)) if fitting else parts
 
     dfile = request.files.get("data")
     data_name, data_parts = None, None
@@ -429,7 +438,7 @@ def submit_job():
 
     common = dict(user_id=user.id, task_type=f"job_{runtime}", job_runtime=runtime, job_entry=entry,
                   job_args=(request.form.get("args") or "")[:500], priority=PRIORITY_BATCH, job_kind=kind or None,
-                  required_cpu=int(num("cores", 1, 16, 1)), required_ram_mb=num("ram_mb", 128, 32768, 1024),
+                  required_cpu=cores, required_ram_mb=ram_mb,
                   required_disk_mb=num("disk_mb", 50, 20480, 500), duration_minutes=int(num("max_minutes", 1, 240, 10)))
     now = datetime.now(timezone.utc)
 

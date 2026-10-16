@@ -99,12 +99,113 @@ def lock_online_nodes():
     nodes, or two concurrent allocators can each believe the same free capacity is available
     and both commit to using it (over-allocation). Concurrent callers block on these rows
     instead of using SKIP LOCKED, so one allocator waiting never sees an empty candidate set
-    just because a peer is mid-decision."""
+    just because a peer is mid-decision.
+
+    Always locked in the same order (by id) so two allocators that both need several of the
+    same nodes never deadlock by acquiring them in opposite order."""
     timeout_limit = datetime.now(timezone.utc) - timedelta(seconds=45)
     return Node.query.filter(
         Node.status == 'online',
         Node.last_heartbeat > timeout_limit
-    ).with_for_update(of=Node).all()
+    ).order_by(Node.id).with_for_update(of=Node).all()
+
+
+def compute_node_usage(node_ids, exclude_task_id=None):
+    """The single source of truth for how booked each node is. Returns {node_id: stats}; stats
+    splits "used" (status == running - actually consuming resources right now) from "reserved"
+    (allocated/starting - promised to a task that hasn't started yet), which the scoring loop
+    below treats identically (both reduce what's left to hand out) but the Unified Quota Ledger
+    (refresh_ledger) persists separately, matching the proposal's own wording for Component 3.
+
+    A physical session takes the WHOLE device under Rule A (see the mode checks in
+    allocate_task and _consolidate), not just its own modest profile - so a node currently
+    holding one is booked at its full total here. Scoring already blocks any other placement on
+    such a node through the explicit mode checks before this dict's cpu/ram numbers are ever
+    consulted, so this only changes what the ledger reports as free, never a placement
+    decision."""
+    q = TaskRequest.query.filter(
+        TaskRequest.assigned_node_id.in_(node_ids),
+        TaskRequest.assigned_node_id.isnot(None),
+        TaskRequest.status.in_(["running", "starting", "allocated"]),
+    )
+    if exclude_task_id is not None:
+        q = q.filter(TaskRequest.id != exclude_task_id)
+    active_tasks = q.all()
+
+    usage_map = {n_id: {"cpu": 0, "ram": 0, "disk": 0, "phys": 0, "rem": 0, "job": 0,
+                         "used_cpu": 0, "used_ram": 0, "reserved_cpu": 0, "reserved_ram": 0}
+                 for n_id in node_ids}
+    physical_node_ids = {t.assigned_node_id for t in active_tasks if t.mode == "physical"}
+    for t in active_tasks:
+        usage = usage_map[t.assigned_node_id]
+        usage["cpu"] += (t.required_cpu or 0)
+        usage["ram"] += (t.required_ram_mb or 0)
+        usage["disk"] += (t.required_disk_mb or 0)
+        if t.mode == "physical": usage["phys"] += 1
+        if t.mode == "remote": usage["rem"] += 1
+        if t.mode == "job": usage["job"] += 1
+        bucket = "used" if t.status == "running" else "reserved"
+        usage[f"{bucket}_cpu"] += (t.required_cpu or 0)
+        usage[f"{bucket}_ram"] += (t.required_ram_mb or 0)
+
+    nodes_by_id = {n.id: n for n in Node.query.filter(Node.id.in_(node_ids)).all()} if physical_node_ids else {}
+    for n_id in physical_node_ids:
+        node = nodes_by_id.get(n_id)
+        if not node:
+            continue
+        bucket = "used" if any(t.assigned_node_id == n_id and t.mode == "physical" and t.status == "running"
+                                for t in active_tasks) else "reserved"
+        usage_map[n_id]["used_cpu"] = usage_map[n_id]["used_ram"] = 0
+        usage_map[n_id]["reserved_cpu"] = usage_map[n_id]["reserved_ram"] = 0
+        usage_map[n_id][f"{bucket}_cpu"] = node.total_cores or 0
+        usage_map[n_id][f"{bucket}_ram"] = node.total_ram_mb or 0
+    return usage_map
+
+
+def refresh_ledger(node_ids):
+    """Persist compute_node_usage()'s numbers onto the Node rows themselves (the Unified Quota
+    Ledger columns), inside the caller's already-locked transaction. Always recomputed as
+    absolute values from TaskRequest, never incremented/decremented in place - an incremental
+    counter drifts the moment one code path forgets to update it, which is the exact bug this
+    replaces from the old ad-hoc quota checks. Caller must already hold the node row locks
+    (e.g. via lock_online_nodes) so this can't race a concurrent allocator."""
+    if not node_ids:
+        return
+    usage_map = compute_node_usage(node_ids)
+    for node in Node.query.filter(Node.id.in_(node_ids)).all():
+        stats = usage_map.get(node.id)
+        if not stats:
+            continue
+        node.used_cores = stats["used_cpu"]
+        node.used_ram_mb = stats["used_ram"]
+        node.reserved_cores = stats["reserved_cpu"]
+        node.reserved_ram_mb = stats["reserved_ram"]
+
+
+def fitting_device_count(cpu, ram_mb):
+    """How many online, job-capable devices could take one unit of this size right now, read
+    from the Unified Quota Ledger columns (Node.used/reserved - kept fresh by refresh_ledger)
+    rather than a fresh lock-and-recompute. This is a submit-time sizing hint for how many
+    parts a plain split job is worth creating (see pool_routes.submit_job), not an allocation
+    decision - the real, authoritative check (with the live psutil reading, row locks, and
+    this same buffer/share-cap math) happens again when each part is actually placed, so a
+    stale or slightly-off read here costs nothing worse than one part landing in the queue for
+    a few seconds instead of running immediately."""
+    count = 0
+    for n in Node.query.filter(Node.status == "online", Node.device_key_hash.isnot(None),
+                                Node.paused.is_(False)).all():
+        if not (n.sandbox_mode in ("docker", "isolated") or
+                (n.sandbox_mode == "light" and n.allow_light_sandbox)):
+            continue
+        cap_cpu = (n.total_cores or 0) - (n.total_cores or 0) * 0.05
+        cap_ram = (n.total_ram_mb or 0) - 768
+        if n.share_cores: cap_cpu = min(cap_cpu, n.share_cores)
+        if n.share_ram_mb: cap_ram = min(cap_ram, n.share_ram_mb)
+        avail_cpu = cap_cpu - (n.used_cores or 0) - (n.reserved_cores or 0)
+        avail_ram = cap_ram - (n.used_ram_mb or 0) - (n.reserved_ram_mb or 0)
+        if avail_cpu >= cpu and avail_ram >= ram_mb:
+            count += 1
+    return count
 
 
 def higher_or_equal_priority_pending(priority, exclude_id=None, exclude_ids=None):
@@ -199,22 +300,13 @@ def allocate_task(task_id):
 
         # BATCH RESOURCE CALCULATION (O(1) database complexity)
         node_ids = [n.id for n in nodes]
+        usage_map = compute_node_usage(node_ids, exclude_task_id=task_id)
         active_tasks = TaskRequest.query.filter(
             TaskRequest.assigned_node_id.in_(node_ids),
             TaskRequest.assigned_node_id.isnot(None),
             TaskRequest.status.in_(["running", "starting", "allocated"]),
             TaskRequest.id != task_id
         ).all()
-
-        usage_map = {n_id: {"cpu": 0, "ram": 0, "disk": 0, "phys": 0, "rem": 0, "job": 0} for n_id in node_ids}
-        for t in active_tasks:
-            usage = usage_map[t.assigned_node_id]
-            usage["cpu"] += (t.required_cpu or 0)
-            usage["ram"] += (t.required_ram_mb or 0)
-            usage["disk"] += (t.required_disk_mb or 0)
-            if t.mode == "physical": usage["phys"] += 1
-            if t.mode == "remote": usage["rem"] += 1
-            if t.mode == "job": usage["job"] += 1
 
         metrics = NodeMetrics.query.filter(
             NodeMetrics.node_id.in_(node_ids)
@@ -347,10 +439,13 @@ def allocate_task(task_id):
             db.session.commit()
             return {"status": "pending"}
 
+        evicted_node_ids = set()
         for j in consolidated_evictions:
+            evicted_node_ids.add(j.assigned_node_id)
             j.status = "pending"
             j.assigned_node_id = None
             j.assigned_pc = None
+            j.allocated_at = None
             j.message = f"Re-queued: moved off {best_node.name} to make room for task {task.id}'s {task.mode} session"
             log_event(j.id, None, "pending", j.message)
 
@@ -361,6 +456,11 @@ def allocate_task(task_id):
         if profile.get("disk"):
             task.required_disk_mb = profile["disk"]
         task.status = "allocated" # Waiting for Agent to start
+        task.allocated_at = datetime.now(timezone.utc)
+
+        # Unified Quota Ledger: persist the new numbers for this node and any node a job was
+        # just evicted from, while we still hold their row locks from lock_online_nodes().
+        refresh_ledger({best_node.id, *evicted_node_ids})
 
         if consolidated_evictions:
             log_event(task.id, best_node.id, "allocated",
@@ -389,18 +489,35 @@ def stop_task(task_id, reason="Requested"):
     if not task or task.status == "completed":
         return {"status": "skipped", "reason": "Task not found or already stopped"}
 
+    node_id = task.assigned_node_id
+    if node_id:
+        # Lock the node row before touching its ledger columns, same discipline as allocate_task.
+        Node.query.with_for_update().get(node_id)
+
     task.status = "completed"
     task.completed_at = datetime.now(timezone.utc)
-    
+
     log_event(task.id, task.assigned_node_id, "completed", f"Stopped: {reason}")
+    if node_id:
+        refresh_ledger([node_id])
     db.session.commit()
-    
+
     return {"status": "stopped", "task_id": task.id}
 
 
 def release_node_tasks(node, reason):
     """A node left or stopped answering. Session requests it had not started yet go back to
-    the queue so another PC / device can take them; work already running there fails."""
+    the queue so another PC / device can take them. Pool-job work (mode == "job") is stateless
+    and restartable - the whole unit reruns from scratch wherever it lands next - so it
+    requeues even if it was already "running" here: only that interrupted unit repeats, per
+    the proposal's lease-based recovery. Physical/remote sessions and ML federated rounds are
+    stateful and can't be silently resumed on another device, so those still fail outright.
+
+    This can falsely trigger on a node that's actually still fine (a dropped heartbeat, not a
+    real failure - see app.tasks.cleanup_system's timeout). The old node finishing its stale
+    run afterwards is harmless: app.pool_agent_routes.job_result() only accepts a result from
+    whichever node is current in assigned_node_id, which this function has already moved on,
+    so a late stale result is rejected rather than silently overwriting the real one."""
     requeued, failed = 0, 0
     tasks = TaskRequest.query.filter(
         TaskRequest.assigned_node_id == node.id,
@@ -408,11 +525,18 @@ def release_node_tasks(node, reason):
     ).all()
     for t in tasks:
         is_ml = "ml" in (t.task_type or "")
-        if t.status in ("allocated", "starting") and not is_ml:
+        resumable = not is_ml and (t.mode == "job" or t.status in ("allocated", "starting"))
+        if resumable:
             log_event(t.id, node.id, "pending", f"Re-queued: {reason} ({node.name})")
             t.status = "pending"
             t.assigned_node_id = None
             t.assigned_pc = None
+            t.allocated_at = None
+            t.start_time = None
+            t.expiry_time = None
+            t.exit_code = None
+            t.output_tail = None
+            t.result_blob_id = None
             t.message = f"Re-queued: {reason}"
             requeued += 1
         else:
@@ -429,4 +553,5 @@ def release_node_tasks(node, reason):
                     parent.status = "failed"
                     parent.message = f"Failed: child task {t.id} lost its device ({reason})"
                     log_event(parent.id, None, "failed", parent.message)
+    refresh_ledger([node.id])
     return requeued, failed
