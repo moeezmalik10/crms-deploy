@@ -386,8 +386,8 @@ def submit_job():
             return default
 
     kind = (request.form.get("kind") or "").strip().lower()
-    if kind not in ("", "sweep", "kfold"):
-        return jsonify({"error": "kind must be empty (custom), 'sweep', or 'kfold'"}), 400
+    if kind not in ("", "sweep", "kfold", "rf"):
+        return jsonify({"error": "kind must be empty (custom), 'sweep', 'kfold', or 'rf'"}), 400
 
     cores = int(num("cores", 1, 16, 1))
     ram_mb = num("ram_mb", 128, 32768, 1024)
@@ -400,8 +400,10 @@ def submit_job():
         if len(param_sets) > MAX_PARTS:
             return jsonify({"error": f"a parameter sweep supports at most {MAX_PARTS} parameter sets"}), 400
         parts = len(param_sets)   # one part per parameter set, not a separately chosen count
-    elif kind == "kfold":
-        parts = int(num("parts", 2, MAX_PARTS, 5))   # parts = k (the number of folds)
+    elif kind in ("kfold", "rf"):
+        # kfold: parts = k (the number of folds). rf: parts = the number of tree groups,
+        # each trained with its own random seed and merged into one forest afterwards.
+        parts = int(num("parts", 2, MAX_PARTS, 5))
     else:
         parts = int(num("parts", 1, MAX_PARTS, 1))
         if parts > 1:
@@ -421,16 +423,19 @@ def submit_job():
             return jsonify({"error": "data file is larger than 10 MB"}), 400
         data_name = os.path.basename(dfile.filename)
         header = request.form.get("header", "1") not in ("0", "false", "off")
-        if kind == "kfold":
-            # k-fold needs the WHOLE dataset in every part, not a row-sliced chunk - each
-            # part does its own internal split (e.g. sklearn's KFold) to hold out its own
-            # fold and train on the rest. Row-sharding would give each part a fold to
-            # validate on but nothing to train on.
+        if kind in ("kfold", "rf"):
+            # k-fold needs the WHOLE dataset in every part, not a row-sliced chunk - each part
+            # does its own internal split (e.g. sklearn's KFold) to hold out its own fold and
+            # train on the rest. Random Forest likewise: each part trains its own group of
+            # trees on the WHOLE dataset (with its own random seed), not a data slice - a tree
+            # trained on only 1/k of the rows would make the merged forest worse, not better.
             data_parts = [raw] * parts
         else:
             data_parts = _split_lines(raw, parts, header) if parts > 1 else [raw]
     elif kind == "kfold":
         return jsonify({"error": "k-fold cross-validation needs a data file"}), 400
+    elif kind == "rf":
+        return jsonify({"error": "Random Forest training needs a data file"}), 400
 
     quota_error = job_quota_message(user.id)
     if quota_error:
@@ -471,6 +476,8 @@ def submit_job():
         group_message = f"Parameter sweep over {parts} parameter sets"
     elif kind == "kfold":
         group_message = f"{parts}-fold cross-validation"
+    elif kind == "rf":
+        group_message = f"Random Forest training across {parts} tree groups"
     else:
         group_message = f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else "")
     group = TaskRequest(mode="job_group", status="group", created_at=now, chunk_id=parts,
@@ -522,6 +529,31 @@ def _job_scores(kids):
     return scores
 
 
+def _job_trees(kids):
+    """{chunk_id: [tree, ...]} for a Random Forest group's parts. Each part's program is
+    expected to write output/result.json with a "trees" field - a JSON array of however it
+    represents one trained tree (CRMS never inspects the shape). Deliberately JSON, not a
+    pickled model: unpickling a file an arbitrary student uploaded would let that upload run
+    code on the server the moment staff opened the combined result, so the server only ever
+    concatenates JSON arrays here, never deserializes an object."""
+    trees = {}
+    for c in kids:
+        if c.status != "completed" or not c.result_blob_id:
+            continue
+        blob = PoolBlob.query.get(c.result_blob_id)
+        if not blob:
+            continue
+        try:
+            raw = _read_zip(blob.data).get("result.json")
+            if raw is not None:
+                t = json.loads(raw).get("trees")
+                if isinstance(t, list):
+                    trees[c.chunk_id] = t
+        except Exception:
+            continue
+    return trees
+
+
 def _group_json(g):
     kids = sorted(g.sub_tasks, key=lambda c: c.chunk_id or 0)
     states = [c.status for c in kids]
@@ -571,6 +603,12 @@ def _group_json(g):
             j["fold_scores"] = [scores.get(c.chunk_id) for c in kids]
             j["average_score"] = sum(scores.values()) / len(scores)
             j["folds_scored"] = len(scores)
+    elif g.job_kind == "rf" and status == "completed":
+        trees = _job_trees(kids)
+        if trees:
+            j["tree_counts"] = {c.chunk_id: len(trees[c.chunk_id]) for c in kids if c.chunk_id in trees}
+            j["trees_total"] = sum(len(t) for t in trees.values())
+            j["groups_merged"] = len(trees)
     return j
 
 
@@ -652,6 +690,23 @@ def _group_result(g):
         else:
             summary.append("")
             summary.append("k-fold cross-validation: no fold reported a usable output/result.json score.")
+    elif g.job_kind == "rf":
+        trees = _job_trees(kids)
+        if trees:
+            merged = []
+            for c in kids:   # original part order, not dict iteration order
+                merged.extend(trees.get(c.chunk_id, []))
+            summary.append("")
+            summary.append(f"Random Forest training: merged {len(merged)} trees from "
+                           f"{len(trees)} of {len(kids)} tree group(s)")
+            for c in kids:
+                if c.chunk_id in trees:
+                    summary.append(f"  group {c.chunk_id}: {len(trees[c.chunk_id])} trees")
+            files["combined_forest.json"] = json.dumps(
+                {"n_estimators": len(merged), "trees": merged}).encode("utf-8")
+        else:
+            summary.append("")
+            summary.append("Random Forest training: no tree group reported a usable output/result.json.")
     files["summary.txt"] = "\n".join(summary).encode("utf-8")
     return Response(_make_zip(files), mimetype="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="job_{g.id}_all_parts.zip"'})
