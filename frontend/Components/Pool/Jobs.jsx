@@ -49,6 +49,9 @@ export default function Jobs() {
     if (kind === "rf" && !data) {
       return setErr("Random Forest training needs a data file - every tree group gets the whole thing.");
     }
+    if (kind === "compile_test" && !data) {
+      return setErr("Batch compile-and-test needs a data file listing the test cases.");
+    }
     setBusy(true); setErr("");
     const fd = new FormData();
     fd.append("file", file);
@@ -56,7 +59,7 @@ export default function Jobs() {
     if (kind === "sweep") {
       fd.append("kind", "sweep");
       fd.append("param_sets", paramSets);
-    } else if (kind === "kfold" || kind === "rf") {
+    } else if (kind === "kfold" || kind === "rf" || kind === "compile_test") {
       fd.append("kind", kind);
       fd.append("parts", parts);
     } else {
@@ -116,17 +119,18 @@ export default function Jobs() {
             <Field label="Disk (MB)"><input type="number" min="50" step="50" value={form.disk_mb} onChange={set("disk_mb")} /></Field>
             <Field label="Time limit (minutes)"><input type="number" min="1" max="240" value={form.max_minutes} onChange={set("max_minutes")} /></Field>
           </div>
-          <Field label="Job type" hint="A sweep runs a different parameter set per device and keeps the best score; k-fold trains on each fold and averages the scores; Random Forest trains tree groups in parallel and merges them">
+          <Field label="Job type" hint="A sweep runs a different parameter set per device and keeps the best score; k-fold trains on each fold and averages the scores; Random Forest trains tree groups in parallel and merges them; batch compile-and-test splits test cases across devices and collects the reports">
             <select value={kind} onChange={(e) => {
               const k = e.target.value;
               setKind(k);
-              if ((k === "kfold" || k === "rf") && parts < 2) setParts(5);
+              if ((k === "kfold" || k === "rf" || k === "compile_test") && parts < 2) setParts(k === "compile_test" ? 3 : 5);
               if (k === "" && parts < 1) setParts(1);
             }}>
               <option value="">Custom - run my own code</option>
               <option value="sweep">Parameter sweep - try several parameter sets at once</option>
               <option value="kfold">k-fold cross-validation - train/validate on k folds, average the scores</option>
               <option value="rf">Random Forest - train tree groups in parallel, merge into one forest</option>
+              <option value="compile_test">Batch compile-and-test - split test cases across devices, collect the reports</option>
             </select>
           </Field>
           {kind === "sweep" ? (
@@ -156,6 +160,21 @@ export default function Jobs() {
               <Field label="Data file (required)" hint="Every tree group gets the whole file - your program trains its own trees with its own random seed">
                 <input ref={dataRef} type="file" accept=".csv,.txt,.tsv,.jsonl" onChange={(e) => setData(e.target.files[0] || null)} />
               </Field>
+            </div>
+          ) : kind === "compile_test" ? (
+            <div className="split">
+              <Field label="Split test cases across" hint={ready == null ? "" : `${ready} ${ready === 1 ? "device" : "devices"} can run jobs right now`}>
+                <select value={parts} onChange={(e) => setParts(Number(e.target.value))}>
+                  {[2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n} parts, on {n} devices</option>)}
+                </select>
+              </Field>
+              <Field label="Test cases file (required)" hint="One row per test case; rows are shared out, each part gets its own slice">
+                <input ref={dataRef} type="file" accept=".csv,.txt,.tsv,.jsonl" onChange={(e) => setData(e.target.files[0] || null)} />
+              </Field>
+              <label className="check">
+                <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} />
+                First row is a header (kept in every part)
+              </label>
             </div>
           ) : (
             <div className="split">
@@ -207,6 +226,15 @@ export default function Jobs() {
               group's trees into one combined forest.
             </p>
           )}
+          {kind === "compile_test" && (
+            <p className="small muted" style={{ margin: 0, maxWidth: "80ch" }}>
+              Each part gets its own slice of the test cases file and runs the same program against just that slice -
+              unlike k-fold/Random Forest, the file is split, not copied whole. Your program compiles/runs the code
+              under test and writes <code>output/result.json</code> with <code>passed</code> and <code>failed</code>{" "}
+              counts and a <code>tests</code> array. The job's result <b>collects</b> every part's report into one
+              combined pass/fail count.
+            </p>
+          )}
           <div className="row">
             <button className="btn primary" disabled={busy}>{busy ? "Uploading..." : "Run on the pool"}</button>
             <span className="small muted">You can have 3 jobs waiting or running at once.</span>
@@ -230,10 +258,16 @@ export default function Jobs() {
                             {j.kind === "sweep" && <span className="chip">parameter sweep</span>}
                             {j.kind === "kfold" && <span className="chip">{j.parts?.length || "k"}-fold cross-validation</span>}
                             {j.kind === "rf" && <span className="chip">Random Forest ({j.parts?.length || "N"} tree groups)</span>}
+                            {j.kind === "compile_test" && <span className="chip">batch compile-and-test</span>}
                             {j.group && <span className="chip">{j.parts_done}/{j.parts.length} parts finished</span>}
                             {j.best_part != null && <span className="chip good">best: part {j.best_part}, score {j.best_score}</span>}
                             {j.average_score != null && <span className="chip good">average score: {j.average_score.toFixed(4)} ({j.folds_scored} fold{j.folds_scored === 1 ? "" : "s"})</span>}
                             {j.trees_total != null && <span className="chip good">merged forest: {j.trees_total} trees from {j.groups_merged} group{j.groups_merged === 1 ? "" : "s"}</span>}
+                            {j.tests_total != null && (
+                              <span className={`chip ${j.all_passed ? "good" : "warn"}`}>
+                                {j.tests_passed}/{j.tests_total} tests passed
+                              </span>
+                            )}
                             {j.exit_code != null && <span className="small muted">exit code {j.exit_code}</span>}
                           </div>
                           <div className="small muted" style={{ marginTop: 4 }}>
