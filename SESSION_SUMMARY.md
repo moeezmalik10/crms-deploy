@@ -182,23 +182,63 @@ the deploy alone:
   exactly as `DEPLOY_GUIDE.md` itself describes happening) so it matches the address already
   checked into `tools/deploy_config.ps1`.
 
+## 6. Two real bugs found by actually running things, not just asserting against fixtures
+
+Both caught *after* the Phase 2 feature work looked complete and fully tested — neither was
+something the pytest fixtures could have caught, and both are now fixed, tested, and confirmed
+live.
+
+- **Checkpoint-hash verification gap in every kind-specific reducer.** A new
+  `backend/tests/real_exec/` harness actually trains real `scikit-learn` Random Forest trees
+  through a real polling agent (no stub) against a real running server, specifically to verify
+  the tree-merge and checkpoint-hash logic against genuine output instead of hand-built
+  fixtures. First run surfaced a real bug: `_job_scores`/`_job_trees`/`_job_reports`/
+  `_job_sim_results` (sweep/k-fold/RF/compile-test/sim's combine helpers) each independently
+  re-fetched a part's stored blob with **no checkpoint-hash check at all** - the generic
+  per-part file loop in `_group_result` correctly excluded a corrupted part from the raw file
+  listing, but every one of these specialized reducers still happily merged its score/trees/
+  report/results anyway. Every pytest fixture test missed this because none of them exercised
+  more than one reducer's corruption path at once. Fixed by routing all four through one shared
+  `_verified_results()` helper. Confirmed fixed against real data twice: before the fix,
+  corrupting one part of a real-trained RF job left the merged forest at 6 trees (wrong,
+  included the corrupted part); after, it correctly drops to 3.
+- **A race that silently undid job cancellation in production.** Found live, independently of
+  the above: `DELETE /pool/jobs/<id>` consistently reported `{"status": "cancelled"}`, but the
+  job reappeared as `"pending"` moments later - did not reproduce locally, since it needs real
+  contention with `process_queue` against a real backlog of queued jobs with zero online
+  devices, which production has and the local suite never did. Root cause: `allocate_task()`
+  had no guard against running on a task that had already moved on for any reason *other* than
+  being assigned a node - `process_queue` sweeps a batch of "pending" tasks every 15s, and if a
+  student cancels a task already in that batch, `allocate_task` runs on it anyway, finds no
+  capacity, and unconditionally resets status back to `"pending"`, undoing the cancellation
+  with no idea it happened. Fixed from both sides: `allocate_task()` now bails out whenever
+  status isn't `"pending"` for any reason, and `delete_job()` now locks every row it touches
+  before mutating (same deterministic lock-ordering discipline as `lock_online_nodes()`).
+  Confirmed fixed live: cancelled three real stuck production jobs, re-checked after 5s and
+  again after 20s (spanning a full `process_queue` cycle) - all held as `"failed"`, no
+  resurrection.
+
 ## Testing
 
-- `backend/tests/` (pytest): **78 tests** total — the original 38 (quotas, scheduler/priority,
-  ledger, metrics history, parameter sweep, k-fold, consolidation, delete-cascade) plus 40 new
+- `backend/tests/` (pytest): **84 tests** total — the original 38 (quotas, scheduler/priority,
+  ledger, metrics history, parameter sweep, k-fold, consolidation, delete-cascade) plus 46 new
   in Phase 2: the Unified Quota Ledger and its CHECK constraint, job-mode fault recovery and
   the stale-sweep fix, free-memory job sizing, Random Forest, batch compile-and-test, batch
-  simulations, and per-unit checkpoint records.
+  simulations, per-unit checkpoint records, the cross-cutting checkpoint-verification fix, and
+  the job-cancellation race fix.
 - `backend/tests/load/`: a separate Locust-based harness (not part of the pytest suite) that
   measures fairness under contention against a throwaway local server — see its own README for
   how to reproduce the 0.9835 result above.
+- `backend/tests/real_exec/`: a separate harness (not part of the pytest suite) that actually
+  trains real Random Forest trees through a real polling agent against a real running server -
+  see its own README; this is what caught the checkpoint-verification gap above.
 - SQLite doesn't enforce foreign keys or CHECK constraints the same way Postgres does by
   default — the FK enforcement listener from Phase 1 covers foreign keys; the Phase 2 ledger
   CHECK constraint is declared directly on the model so SQLite enforces it too, confirmed by a
   test that deliberately violates it and expects the resulting `IntegrityError`.
-- All 78 backend tests pass, no regressions. Frontend production build verified after every
-  change, and every job-type addition re-verified directly against the live backend after
-  deploy (see §5).
+- All 84 backend tests pass, no regressions. Frontend production build verified after every
+  change, and every job-type addition and bug fix re-verified directly against the live backend
+  after deploy (see §5).
 
 ## Known gaps / not done in this session
 
