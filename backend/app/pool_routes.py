@@ -845,7 +845,13 @@ def delete_job(task_id):
     if t.user_id != user.id and role != "admin":
         return jsonify({"error": "not your job"}), 403
     if t.mode == "job_group":
-        active = [c for c in t.sub_tasks if c.status in ACTIVE + ("pending",)]
+        # Lock every child (by id, same deterministic order used elsewhere this session) before
+        # touching any of it - without this, a concurrent process_queue tick can read a child as
+        # still "pending" a moment before this commits "failed", then commit straight back over
+        # it once this transaction releases the lock, silently undoing the cancellation.
+        kids = TaskRequest.query.filter_by(parent_task_id=t.id).order_by(TaskRequest.id) \
+                          .with_for_update().all()
+        active = [c for c in kids if c.status in ACTIVE + ("pending",)]
         if active:
             for c in active:
                 c.status = "failed"
@@ -854,13 +860,14 @@ def delete_job(task_id):
                 log_event(c.id, c.assigned_node_id, "failed", "Cancelled by the student")
             db.session.commit()
             return jsonify({"status": "cancelled"})
-        for c in t.sub_tasks:
+        for c in kids:
             for bid in (c.input_blob_id, c.result_blob_id):
                 if bid:
                     PoolBlob.query.filter_by(id=bid).delete()
         db.session.delete(t)
         db.session.commit()
         return jsonify({"status": "deleted"})
+    t = TaskRequest.query.filter_by(id=task_id).with_for_update().one()
     if t.status in ACTIVE or t.status == "pending":
         # The agent sees the new status within seconds and removes the sandbox
         t.status = "failed"
