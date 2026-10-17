@@ -388,8 +388,8 @@ def submit_job():
             return default
 
     kind = (request.form.get("kind") or "").strip().lower()
-    if kind not in ("", "sweep", "kfold", "rf", "compile_test"):
-        return jsonify({"error": "kind must be empty (custom), 'sweep', 'kfold', 'rf', or 'compile_test'"}), 400
+    if kind not in ("", "sweep", "kfold", "rf", "compile_test", "sim"):
+        return jsonify({"error": "kind must be empty (custom), 'sweep', 'kfold', 'rf', 'compile_test', or 'sim'"}), 400
 
     cores = int(num("cores", 1, 16, 1))
     ram_mb = num("ram_mb", 128, 32768, 1024)
@@ -402,9 +402,11 @@ def submit_job():
         if len(param_sets) > MAX_PARTS:
             return jsonify({"error": f"a parameter sweep supports at most {MAX_PARTS} parameter sets"}), 400
         parts = len(param_sets)   # one part per parameter set, not a separately chosen count
-    elif kind in ("kfold", "rf"):
-        # kfold: parts = k (the number of folds). rf: parts = the number of tree groups,
-        # each trained with its own random seed and merged into one forest afterwards.
+    elif kind in ("kfold", "rf", "sim"):
+        # kfold: parts = k (the number of folds). rf: parts = the number of tree groups, each
+        # trained with its own random seed and merged into one forest afterwards. sim: parts =
+        # the number of simulation groups, each running its own batch of runs with its own
+        # random seed, whose results get pooled and aggregated afterwards.
         parts = int(num("parts", 2, MAX_PARTS, 5))
     else:
         parts = int(num("parts", 1, MAX_PARTS, 1))
@@ -425,12 +427,15 @@ def submit_job():
             return jsonify({"error": "data file is larger than 10 MB"}), 400
         data_name = os.path.basename(dfile.filename)
         header = request.form.get("header", "1") not in ("0", "false", "off")
-        if kind in ("kfold", "rf"):
+        if kind in ("kfold", "rf", "sim"):
             # k-fold needs the WHOLE dataset in every part, not a row-sliced chunk - each part
             # does its own internal split (e.g. sklearn's KFold) to hold out its own fold and
             # train on the rest. Random Forest likewise: each part trains its own group of
             # trees on the WHOLE dataset (with its own random seed), not a data slice - a tree
-            # trained on only 1/k of the rows would make the merged forest worse, not better.
+            # trained on only 1/k of the rows would make the merged forest worse, not better. A
+            # simulation's optional scenario/config file is shared the same way: every group of
+            # runs simulates the same scenario, just with its own random seed - splitting the
+            # config file by rows would leave each part missing most of the simulation's setup.
             data_parts = [raw] * parts
         else:
             data_parts = _split_lines(raw, parts, header) if parts > 1 else [raw]
@@ -440,6 +445,8 @@ def submit_job():
         return jsonify({"error": "Random Forest training needs a data file"}), 400
     elif kind == "compile_test":
         return jsonify({"error": "batch compile-and-test needs a data file listing the test cases"}), 400
+    # sim's data file is optional - plenty of simulations (Monte Carlo, SUMO with a fixed
+    # built-in scenario) need no external config at all, just a seed per group of runs.
 
     quota_error = job_quota_message(user.id)
     if quota_error:
@@ -484,6 +491,8 @@ def submit_job():
         group_message = f"Random Forest training across {parts} tree groups"
     elif kind == "compile_test":
         group_message = f"Batch compile-and-test across {parts} parts; test cases split by rows"
+    elif kind == "sim":
+        group_message = f"Batch simulation across {parts} groups of runs"
     else:
         group_message = f"Split into {parts} parts" + (f"; {data_name} split by rows" if data_name else "")
     group = TaskRequest(mode="job_group", status="group", created_at=now, chunk_id=parts,
@@ -586,6 +595,46 @@ def _job_reports(kids):
     return reports
 
 
+def _job_sim_results(kids):
+    """{chunk_id: [float, ...]} for a batch simulation group's parts. Each part's program is
+    expected to write output/result.json with a "results" field - one number per simulation
+    run it performed (CRMS never cares what the number represents, e.g. a travel time from a
+    SUMO run or a Monte Carlo trial's outcome). Unlike _job_trees/_job_reports, the point of
+    this job type specifically is CRMS doing the aggregation (see _sim_stats), not just
+    concatenating whatever the parts send back."""
+    results = {}
+    for c in kids:
+        if c.status != "completed" or not c.result_blob_id:
+            continue
+        blob = PoolBlob.query.get(c.result_blob_id)
+        if not blob:
+            continue
+        try:
+            raw = _read_zip(blob.data).get("result.json")
+            if raw is None:
+                continue
+            r = json.loads(raw).get("results")
+            if isinstance(r, list) and all(isinstance(x, (int, float)) for x in r):
+                results[c.chunk_id] = r
+        except Exception:
+            continue
+    return results
+
+
+def _sim_stats(pooled):
+    """count/sum/mean/min/max/stdev over every run's result, pooled across every reporting
+    group - "aggregating statistics" is this job type's own combine step, per the proposal,
+    not a reduction CRMS leaves to the student's own code the way sweep/k-fold/RF do."""
+    n = len(pooled)
+    if n == 0:
+        return None
+    total = sum(pooled)
+    mean = total / n
+    variance = sum((x - mean) ** 2 for x in pooled) / n if n > 1 else 0.0
+    return {"count": n, "sum": total, "mean": mean, "min": min(pooled), "max": max(pooled),
+           "stdev": variance ** 0.5}
+
+
 def _group_json(g):
     kids = sorted(g.sub_tasks, key=lambda c: c.chunk_id or 0)
     states = [c.status for c in kids]
@@ -652,6 +701,12 @@ def _group_json(g):
             j["tests_failed"] = sum(r["failed"] for r in reports.values())
             j["tests_total"] = j["tests_passed"] + j["tests_failed"]
             j["all_passed"] = j["tests_failed"] == 0
+    elif g.job_kind == "sim" and status == "completed":
+        sim_results = _job_sim_results(kids)
+        if sim_results:
+            pooled = [x for r in sim_results.values() for x in r]
+            j["sim_stats"] = _sim_stats(pooled)
+            j["sim_groups_reporting"] = len(sim_results)
     return j
 
 
@@ -776,6 +831,25 @@ def _group_result(g):
         else:
             summary.append("")
             summary.append("Batch compile-and-test: no part reported a usable output/result.json.")
+    elif g.job_kind == "sim":
+        sim_results = _job_sim_results(kids)
+        if sim_results:
+            pooled = []
+            for c in kids:   # original part order
+                pooled.extend(sim_results.get(c.chunk_id, []))
+            stats = _sim_stats(pooled)
+            summary.append("")
+            summary.append(f"Batch simulation: {stats['count']} run(s) pooled from "
+                           f"{len(sim_results)} of {len(kids)} group(s) - "
+                           f"mean {stats['mean']:.4g}, stdev {stats['stdev']:.4g}, "
+                           f"range [{stats['min']:.4g}, {stats['max']:.4g}]")
+            for c in kids:
+                if c.chunk_id in sim_results:
+                    summary.append(f"  group {c.chunk_id}: {len(sim_results[c.chunk_id])} run(s)")
+            files["combined_stats.json"] = json.dumps({**stats, "results": pooled}).encode("utf-8")
+        else:
+            summary.append("")
+            summary.append("Batch simulation: no group reported a usable output/result.json.")
     files["summary.txt"] = "\n".join(summary).encode("utf-8")
     return Response(_make_zip(files), mimetype="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="job_{g.id}_all_parts.zip"'})

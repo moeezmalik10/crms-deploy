@@ -59,7 +59,7 @@ export default function Jobs() {
     if (kind === "sweep") {
       fd.append("kind", "sweep");
       fd.append("param_sets", paramSets);
-    } else if (kind === "kfold" || kind === "rf" || kind === "compile_test") {
+    } else if (kind === "kfold" || kind === "rf" || kind === "compile_test" || kind === "sim") {
       fd.append("kind", kind);
       fd.append("parts", parts);
     } else {
@@ -119,11 +119,11 @@ export default function Jobs() {
             <Field label="Disk (MB)"><input type="number" min="50" step="50" value={form.disk_mb} onChange={set("disk_mb")} /></Field>
             <Field label="Time limit (minutes)"><input type="number" min="1" max="240" value={form.max_minutes} onChange={set("max_minutes")} /></Field>
           </div>
-          <Field label="Job type" hint="A sweep runs a different parameter set per device and keeps the best score; k-fold trains on each fold and averages the scores; Random Forest trains tree groups in parallel and merges them; batch compile-and-test splits test cases across devices and collects the reports">
+          <Field label="Job type" hint="A sweep runs a different parameter set per device and keeps the best score; k-fold trains on each fold and averages the scores; Random Forest trains tree groups in parallel and merges them; batch compile-and-test splits test cases across devices and collects the reports; batch simulation runs groups of runs in parallel and aggregates the statistics">
             <select value={kind} onChange={(e) => {
               const k = e.target.value;
               setKind(k);
-              if ((k === "kfold" || k === "rf" || k === "compile_test") && parts < 2) setParts(k === "compile_test" ? 3 : 5);
+              if ((k === "kfold" || k === "rf" || k === "compile_test" || k === "sim") && parts < 2) setParts(k === "compile_test" ? 3 : 5);
               if (k === "" && parts < 1) setParts(1);
             }}>
               <option value="">Custom - run my own code</option>
@@ -131,6 +131,7 @@ export default function Jobs() {
               <option value="kfold">k-fold cross-validation - train/validate on k folds, average the scores</option>
               <option value="rf">Random Forest - train tree groups in parallel, merge into one forest</option>
               <option value="compile_test">Batch compile-and-test - split test cases across devices, collect the reports</option>
+              <option value="sim">Batch simulation - run groups of simulations in parallel, aggregate the statistics</option>
             </select>
           </Field>
           {kind === "sweep" ? (
@@ -175,6 +176,17 @@ export default function Jobs() {
                 <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} />
                 First row is a header (kept in every part)
               </label>
+            </div>
+          ) : kind === "sim" ? (
+            <div className="split">
+              <Field label="Number of simulation groups" hint={ready == null ? "" : `${ready} ${ready === 1 ? "device" : "devices"} can run jobs right now`}>
+                <select value={parts} onChange={(e) => setParts(Number(e.target.value))}>
+                  {[2, 3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n} groups, on {n} devices</option>)}
+                </select>
+              </Field>
+              <Field label="Scenario/config file (optional)" hint="If given, every group gets the whole file - only needed if your simulation reads external config">
+                <input ref={dataRef} type="file" accept=".csv,.txt,.tsv,.jsonl,.json,.xml" onChange={(e) => setData(e.target.files[0] || null)} />
+              </Field>
             </div>
           ) : (
             <div className="split">
@@ -235,6 +247,15 @@ export default function Jobs() {
               combined pass/fail count.
             </p>
           )}
+          {kind === "sim" && (
+            <p className="small muted" style={{ margin: 0, maxWidth: "80ch" }}>
+              Each group runs at the same time on a different device, with the whole scenario file if you gave one.
+              Your program reads <code>CRMS_PART</code> and <code>CRMS_PARTS</code> (e.g. group 2 of {parts}) to pick
+              its own random seed, runs its own batch of simulations, and writes <code>output/result.json</code> with
+              a <code>results</code> array (one number per run). The job's result <b>pools</b> every group's runs and
+              reports the combined count, mean, min, max and standard deviation.
+            </p>
+          )}
           <div className="row">
             <button className="btn primary" disabled={busy}>{busy ? "Uploading..." : "Run on the pool"}</button>
             <span className="small muted">You can have 3 jobs waiting or running at once.</span>
@@ -259,6 +280,7 @@ export default function Jobs() {
                             {j.kind === "kfold" && <span className="chip">{j.parts?.length || "k"}-fold cross-validation</span>}
                             {j.kind === "rf" && <span className="chip">Random Forest ({j.parts?.length || "N"} tree groups)</span>}
                             {j.kind === "compile_test" && <span className="chip">batch compile-and-test</span>}
+                            {j.kind === "sim" && <span className="chip">batch simulation ({j.parts?.length || "N"} groups)</span>}
                             {j.group && <span className="chip">{j.parts_done}/{j.parts.length} parts finished</span>}
                             {j.best_part != null && <span className="chip good">best: part {j.best_part}, score {j.best_score}</span>}
                             {j.average_score != null && <span className="chip good">average score: {j.average_score.toFixed(4)} ({j.folds_scored} fold{j.folds_scored === 1 ? "" : "s"})</span>}
@@ -266,6 +288,12 @@ export default function Jobs() {
                             {j.tests_total != null && (
                               <span className={`chip ${j.all_passed ? "good" : "warn"}`}>
                                 {j.tests_passed}/{j.tests_total} tests passed
+                              </span>
+                            )}
+                            {j.sim_stats != null && (
+                              <span className="chip good">
+                                {j.sim_stats.count} run{j.sim_stats.count === 1 ? "" : "s"}: mean {j.sim_stats.mean.toFixed(3)},
+                                stdev {j.sim_stats.stdev.toFixed(3)}, range [{j.sim_stats.min.toFixed(3)}, {j.sim_stats.max.toFixed(3)}]
                               </span>
                             )}
                             {j.exit_code != null && <span className="small muted">exit code {j.exit_code}</span>}
