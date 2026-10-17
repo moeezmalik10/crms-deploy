@@ -42,6 +42,7 @@ NEW_COLUMNS = {
         ("priority", "INTEGER DEFAULT 50"),
         ("job_kind", "VARCHAR(20)"),
         ("allocated_at", "TIMESTAMPTZ"),
+        ("result_sha256", "VARCHAR(64)"),
     ],
 }
 

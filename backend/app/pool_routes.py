@@ -321,6 +321,8 @@ def _job_json(t):
         "completed_at": _aware(t.completed_at).isoformat() if t.completed_at else None,
         "exit_code": t.exit_code, "output": t.output_tail or "",
         "has_result": bool(t.result_blob_id), "reason": last.message if last else "",
+        "checkpoint": {"unit_id": t.id, "status": t.status, "sha256": t.result_sha256}
+        if t.result_sha256 else None,
     }
 
 
@@ -611,7 +613,11 @@ def _group_json(g):
         "created_at": _aware(g.created_at).isoformat() if g.created_at else None,
         "parts": [{"part": c.chunk_id, "status": c.status, "device": c.assigned_pc, "exit_code": c.exit_code,
                    "seconds": round((_aware(c.completed_at) - _aware(c.start_time)).total_seconds(), 1)
-                   if c.start_time and c.completed_at else None} for c in kids],
+                   if c.start_time and c.completed_at else None,
+                   # The checkpoint record Component 5 describes: unit ID (part/task id), status,
+                   # and the SHA-256 hash taken the moment this unit finished.
+                   "checkpoint": {"unit_id": c.id, "status": c.status, "sha256": c.result_sha256}
+                   if c.result_sha256 else None} for c in kids],
         "parts_done": sum(1 for s in states if s in ("completed", "failed")),
         "wall_seconds": round(wall, 1) if wall is not None else None,
         "work_seconds": round(sum(durations), 1) if durations else None,
@@ -673,6 +679,8 @@ def job_result_download(task_id):
     blob = PoolBlob.query.get(t.result_blob_id) if t.result_blob_id else None
     if not blob:
         return jsonify({"error": "no result file"}), 404
+    if t.result_sha256 and hashlib.sha256(blob.data).hexdigest() != t.result_sha256:
+        return jsonify({"error": "result check failed - the stored copy no longer matches its checkpoint hash"}), 500
     return Response(blob.data, mimetype="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{blob.name}"'})
 
@@ -687,6 +695,9 @@ def _group_result(g):
                        + (f" in {secs:.1f} s" if secs is not None else "") + f" (exit code {c.exit_code})")
         blob = PoolBlob.query.get(c.result_blob_id) if c.result_blob_id else None
         if not blob:
+            continue
+        if c.result_sha256 and hashlib.sha256(blob.data).hexdigest() != c.result_sha256:
+            summary.append(f"  part {c.chunk_id}: result check failed - skipped from this combined download")
             continue
         for n, b in _read_zip(blob.data).items():
             files[f"part_{c.chunk_id}/{n}"] = b

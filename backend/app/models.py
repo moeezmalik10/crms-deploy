@@ -198,6 +198,12 @@ class TaskRequest(db.Model):
     result_blob_id = db.Column(db.Integer)
     exit_code = db.Column(db.Integer)
     output_tail = db.Column(db.Text)
+    # The checkpoint record Component 5 describes: "unit ID, status and a SHA-256 hash of the
+    # output" - unit ID and status are this row's own id/status; this is the hash, taken over
+    # the result blob's raw bytes the moment a unit finishes (app.pool_agent_routes.job_result),
+    # and re-checked whenever that result is served back out (app.pool_routes), so silent
+    # corruption between the two is caught rather than handed to the student unnoticed.
+    result_sha256 = db.Column(db.String(64))
     # None = run-arbitrary-code job (today's behaviour). "sweep" = parameter sweep: each part
     # gets its own argument set, the group's result is the part with the best score.
     job_kind = db.Column(db.String(20))
