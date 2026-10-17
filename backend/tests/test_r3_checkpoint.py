@@ -7,6 +7,7 @@ app.pool_routes.job_result_download()/_group_result().
 """
 import hashlib
 import io
+import json
 import zipfile
 
 from app.pool_security import sha256_hex
@@ -176,3 +177,50 @@ def test_job_json_exposes_the_checkpoint_record(client, make_user, make_node, db
     assert job["checkpoint"]["unit_id"] == task_id
     assert job["checkpoint"]["status"] == "completed"
     assert job["checkpoint"]["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_a_corrupted_part_is_excluded_from_every_kind_specific_reducer(client, make_user, db):
+    """Caught live by an end-to-end real-execution run (genuine sklearn RF training, a real
+    agent, a real corrupted blob afterward): the generic per-part file loop in _group_result
+    already excluded a corrupted part via its checkpoint hash, but _job_scores/_job_trees/
+    _job_reports/_job_sim_results each independently re-fetched blob.data with no hash check at
+    all - so a corrupted part's "trees"/"score"/"tests"/"results" still made it into the
+    merge/average/report/aggregate even though the raw files were correctly excluded from the
+    zip. All four now share _verified_results(), which does the check once."""
+    from app.models import PoolBlob, TaskRequest
+    from app.pool_routes import _job_reports, _job_scores, _job_sim_results, _job_trees
+    from datetime import datetime, timezone
+
+    student = make_user("ck7", "ck7@uog.edu.pk")
+    now = datetime.now(timezone.utc)
+    group = TaskRequest(user_id=student.id, task_type="job_python", mode="job_group",
+                        status="group", chunk_id=1, message="checkpoint-corruption test",
+                        required_cpu=1, required_ram_mb=256, created_at=now)
+    db.session.add(group)
+    db.session.flush()
+
+    # A payload with every field each reducer looks for, so a false "excluded" pass can't come
+    # from the field simply being absent rather than the hash check actually doing its job.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("output/result.json",
+                  json.dumps({"score": 1, "trees": [{"a": 1}], "passed": 1, "failed": 0,
+                              "tests": [{"name": "t"}], "results": [1.0, 2.0]}))
+    payload = buf.getvalue()
+    blob = PoolBlob(owner_user_id=student.id, kind="job_result", name="r.zip",
+                    size=len(payload), data=payload)
+    db.session.add(blob)
+    db.session.flush()
+    part = TaskRequest(user_id=student.id, task_type="job_python", mode="job", status="completed",
+                       parent_task_id=group.id, chunk_id=1, result_blob_id=blob.id,
+                       result_sha256="0" * 64,   # deliberately wrong, like a corrupted file
+                       start_time=now, completed_at=now, exit_code=0,
+                       required_cpu=1, required_ram_mb=256, created_at=now)
+    db.session.add(part)
+    db.session.commit()
+
+    kids = [TaskRequest.query.get(part.id)]
+    assert _job_scores(kids) == {}
+    assert _job_trees(kids) == {}
+    assert _job_reports(kids) == {}
+    assert _job_sim_results(kids) == {}
