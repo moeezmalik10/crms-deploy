@@ -17,3 +17,7 @@ node-agent/node_name.txt
 node-agent/join_code.txt
 node-agent/sandbox_users.json
 node-agent/cloudflared*
+backend/tests/load/loadtest.db
+backend/tests/load/students.json
+backend/tests/load/nodes.json
+backend/tests/load/results_*.csv
