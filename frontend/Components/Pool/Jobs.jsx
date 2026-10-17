@@ -316,6 +316,11 @@ function Parts({ j }) {
                 <span className={cls}>{label}</span>
                 {p.seconds != null && <span className="small">{secs(p.seconds)}</span>}
               </div>
+              {p.checkpoint && (
+                <div className="small muted clip" title={`SHA-256: ${p.checkpoint.sha256}`} style={{ marginTop: 2 }}>
+                  checkpoint: {p.checkpoint.sha256.slice(0, 10)}…
+                </div>
+              )}
             </div>
           );
         })}

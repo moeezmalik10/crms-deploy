@@ -120,6 +120,10 @@ def job_result(task_id):
             db.session.add(blob)
             db.session.flush()
             task.result_blob_id = blob.id
+            # The checkpoint record: taken the moment this unit finishes, over the exact bytes
+            # just stored, so a later mismatch means the stored copy was corrupted afterwards,
+            # not that this unit's work was ever lost.
+            task.result_sha256 = hashlib.sha256(data).hexdigest()
     ok = exit_code == 0 and not reason
     task.status = "completed" if ok else "failed"
     task.completed_at = datetime.now(timezone.utc)
