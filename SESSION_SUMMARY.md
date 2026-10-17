@@ -125,12 +125,11 @@ against the actual code and then closed:
   writes `output/result.json` with a `trees` field. Combine step concatenates every part's
   trees into one merged forest. Deliberately a JSON array, not a pickled model — unpickling a
   student's upload server-side would be a straightforward RCE hole.
-- **Batch compile-and-test** (`kind=compile_test`) — fourth and last defined batch job type.
-  Unlike k-fold/RF, test cases are *row-sliced* across parts (same mechanism as the plain split
-  job) — the point is running a fixed test suite faster, not training on the whole thing in
-  every part. Each part writes `passed`/`failed` counts and a `tests` array; combine step sums
-  counts and concatenates the array. All six job types from the proposal's table are now
-  covered (chunked data processing was already satisfied by the generic split path).
+- **Batch compile-and-test** (`kind=compile_test`) — fourth defined batch job type. Unlike
+  k-fold/RF, test cases are *row-sliced* across parts (same mechanism as the plain split job) —
+  the point is running a fixed test suite faster, not training on the whole thing in every part.
+  Each part writes `passed`/`failed` counts and a `tests` array; combine step sums counts and
+  concatenates the array.
 - **Per-unit checkpoint records** — `TaskRequest.result_sha256`, computed over the exact
   uploaded bytes the moment a unit finishes and *re-verified on every read*, not just stored
   decoratively: a single-job download rejects (500) if the stored copy no longer matches its
@@ -140,6 +139,17 @@ against the actual code and then closed:
   units without a saved checkpoint return to the queue" behavior was already correct before
   this (completed tasks were never re-requeued); this adds the literal checkpoint artifact the
   proposal describes.
+- **Batch simulations** (`kind=sim`) — fifth defined batch job type, and the one genuinely
+  missing after the compile-and-test work: an earlier summary in this session incorrectly
+  claimed "all six job types are now covered" when only five of six (four explicit kinds plus
+  the generic split path standing in for "chunked data processing") actually existed. Like
+  k-fold/RF, every group gets the whole (optional) scenario file and reads
+  `CRMS_PART`/`CRMS_PARTS` to pick its own random seed for its own batch of runs. Unlike every
+  other job type, the combine step is CRMS itself *aggregating statistics* — count, sum, mean,
+  min, max, standard deviation pooled across every group's runs — matching the proposal's own
+  wording for this row rather than reusing another type's reduce. The data file is optional
+  here (unlike k-fold/RF/compile-test), since plenty of simulations need no external config at
+  all. All six job types from the proposal's table are now genuinely covered.
 - **Load testing + Jain's fairness index, actually run** — a new `backend/tests/load/` harness
   (Locust + a simulated-node stub, never the real deployment) measuring Objective 2's success
   criterion directly: 20 simulated students competing for 3 deliberately scarce simulated
@@ -155,13 +165,30 @@ asserted) and the live site was driven directly through the browser pane partway
 (logged in by the user; a live test device was spun up, exercised, and later removed) before
 the focus shifted to closing code-level gaps.
 
+## 5. Live production verification
+
+After each Phase 2 deploy, re-checked directly against the live backend rather than trusting
+the deploy alone:
+- Confirmed the Postgres migration (new ledger columns, `allocated_at`, `result_sha256`, both
+  `CHECK` constraints) applied cleanly with no 500s anywhere.
+- Submitted real jobs of every new kind (`rf`, `compile_test`, `sim` with and without a data
+  file) straight against the live API and confirmed each created the right shape of job group,
+  then cancelled them all afterward - nothing left dangling in production.
+- `/pool/ledger` confirmed serving the refactored shared `compute_node_usage()` correctly.
+- Removed the **MOEEZ-2** test device (registered earlier in the session for live testing) from
+  the pool once it was no longer needed.
+- Fixed a stale value in `node-agent/backend_url.txt` (pointed at a backend address that
+  doesn't exist - Render had appended `-cusl` to the real one since the short name was taken,
+  exactly as `DEPLOY_GUIDE.md` itself describes happening) so it matches the address already
+  checked into `tools/deploy_config.ps1`.
+
 ## Testing
 
-- `backend/tests/` (pytest): **72 tests** total — the original 38 (quotas, scheduler/priority,
-  ledger, metrics history, parameter sweep, k-fold, consolidation, delete-cascade) plus 34 new
+- `backend/tests/` (pytest): **78 tests** total — the original 38 (quotas, scheduler/priority,
+  ledger, metrics history, parameter sweep, k-fold, consolidation, delete-cascade) plus 40 new
   in Phase 2: the Unified Quota Ledger and its CHECK constraint, job-mode fault recovery and
-  the stale-sweep fix, free-memory job sizing, Random Forest, batch compile-and-test, and
-  per-unit checkpoint records.
+  the stale-sweep fix, free-memory job sizing, Random Forest, batch compile-and-test, batch
+  simulations, and per-unit checkpoint records.
 - `backend/tests/load/`: a separate Locust-based harness (not part of the pytest suite) that
   measures fairness under contention against a throwaway local server — see its own README for
   how to reproduce the 0.9835 result above.
@@ -169,8 +196,9 @@ the focus shifted to closing code-level gaps.
   default — the FK enforcement listener from Phase 1 covers foreign keys; the Phase 2 ledger
   CHECK constraint is declared directly on the model so SQLite enforces it too, confirmed by a
   test that deliberately violates it and expects the resulting `IntegrityError`.
-- All 72 backend tests pass, no regressions. Frontend production build verified after every
-  change.
+- All 78 backend tests pass, no regressions. Frontend production build verified after every
+  change, and every job-type addition re-verified directly against the live backend after
+  deploy (see §5).
 
 ## Known gaps / not done in this session
 
