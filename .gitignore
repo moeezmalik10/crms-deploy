@@ -21,3 +21,5 @@ backend/tests/load/loadtest.db
 backend/tests/load/students.json
 backend/tests/load/nodes.json
 backend/tests/load/results_*.csv
+backend/tests/real_exec/real_exec.db
+backend/tests/real_exec/work/

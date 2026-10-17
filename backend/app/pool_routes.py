@@ -521,26 +521,41 @@ def submit_job():
     return jsonify({"job": _group_json(TaskRequest.query.get(group.id)), "allocation": allocations})
 
 
-def _job_scores(kids):
-    """{chunk_id: score} for a defined-job-type group's parts (parameter sweep or k-fold).
-    Each part's program is expected to write output/result.json with a numeric "score" field -
-    that file lands at the result zip's root (pool_runtime.run_job flattens the job's own
-    output/ folder into the zip)."""
-    scores = {}
+def _verified_results(kids):
+    """{chunk_id: result.json dict} for every completed part whose stored blob still matches
+    its checkpoint hash - the single place every kind-specific reducer (_job_scores/_job_trees/
+    _job_reports/_job_sim_results) reads a part's output.json from, so a corrupted part is
+    excluded from every one of them the same way _group_result's own file loop already excludes
+    it, not just from the generic per-part file listing. A part with no recorded hash (e.g. a
+    row from before checkpointing existed) is trusted as-is rather than treated as corrupt."""
+    out = {}
     for c in kids:
         if c.status != "completed" or not c.result_blob_id:
             continue
         blob = PoolBlob.query.get(c.result_blob_id)
         if not blob:
             continue
+        if c.result_sha256 and hashlib.sha256(blob.data).hexdigest() != c.result_sha256:
+            continue
         try:
             raw = _read_zip(blob.data).get("result.json")
             if raw is not None:
-                score = json.loads(raw).get("score")
-                if isinstance(score, (int, float)):
-                    scores[c.chunk_id] = score
+                out[c.chunk_id] = json.loads(raw)
         except Exception:
             continue
+    return out
+
+
+def _job_scores(kids):
+    """{chunk_id: score} for a defined-job-type group's parts (parameter sweep or k-fold).
+    Each part's program is expected to write output/result.json with a numeric "score" field -
+    that file lands at the result zip's root (pool_runtime.run_job flattens the job's own
+    output/ folder into the zip)."""
+    scores = {}
+    for chunk_id, data in _verified_results(kids).items():
+        score = data.get("score")
+        if isinstance(score, (int, float)):
+            scores[chunk_id] = score
     return scores
 
 
@@ -552,20 +567,10 @@ def _job_trees(kids):
     code on the server the moment staff opened the combined result, so the server only ever
     concatenates JSON arrays here, never deserializes an object."""
     trees = {}
-    for c in kids:
-        if c.status != "completed" or not c.result_blob_id:
-            continue
-        blob = PoolBlob.query.get(c.result_blob_id)
-        if not blob:
-            continue
-        try:
-            raw = _read_zip(blob.data).get("result.json")
-            if raw is not None:
-                t = json.loads(raw).get("trees")
-                if isinstance(t, list):
-                    trees[c.chunk_id] = t
-        except Exception:
-            continue
+    for chunk_id, data in _verified_results(kids).items():
+        t = data.get("trees")
+        if isinstance(t, list):
+            trees[chunk_id] = t
     return trees
 
 
@@ -575,23 +580,11 @@ def _job_reports(kids):
     and "failed" counts and a "tests" array (whatever per-test detail it wants to report -
     CRMS only sums the counts and concatenates the array, same JSON-only rule as _job_trees)."""
     reports = {}
-    for c in kids:
-        if c.status != "completed" or not c.result_blob_id:
-            continue
-        blob = PoolBlob.query.get(c.result_blob_id)
-        if not blob:
-            continue
-        try:
-            raw = _read_zip(blob.data).get("result.json")
-            if raw is None:
-                continue
-            data = json.loads(raw)
-            passed, failed = data.get("passed"), data.get("failed")
-            if isinstance(passed, int) and isinstance(failed, int):
-                reports[c.chunk_id] = {"passed": passed, "failed": failed,
-                                       "tests": data.get("tests") if isinstance(data.get("tests"), list) else []}
-        except Exception:
-            continue
+    for chunk_id, data in _verified_results(kids).items():
+        passed, failed = data.get("passed"), data.get("failed")
+        if isinstance(passed, int) and isinstance(failed, int):
+            reports[chunk_id] = {"passed": passed, "failed": failed,
+                                 "tests": data.get("tests") if isinstance(data.get("tests"), list) else []}
     return reports
 
 
@@ -603,21 +596,10 @@ def _job_sim_results(kids):
     this job type specifically is CRMS doing the aggregation (see _sim_stats), not just
     concatenating whatever the parts send back."""
     results = {}
-    for c in kids:
-        if c.status != "completed" or not c.result_blob_id:
-            continue
-        blob = PoolBlob.query.get(c.result_blob_id)
-        if not blob:
-            continue
-        try:
-            raw = _read_zip(blob.data).get("result.json")
-            if raw is None:
-                continue
-            r = json.loads(raw).get("results")
-            if isinstance(r, list) and all(isinstance(x, (int, float)) for x in r):
-                results[c.chunk_id] = r
-        except Exception:
-            continue
+    for chunk_id, data in _verified_results(kids).items():
+        r = data.get("results")
+        if isinstance(r, list) and all(isinstance(x, (int, float)) for x in r):
+            results[chunk_id] = r
     return results
 
 
