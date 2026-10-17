@@ -253,9 +253,17 @@ def allocate_task(task_id):
         if not task:
             return {"error": "Task not found"}
         
-        # If already assigned, don't re-allocate
-        if task.assigned_node_id and task.status != "pending":
-            return {"status": "already_allocated", "pc": task.assigned_pc}
+        # If already assigned, don't re-allocate. If it's moved on for any other reason - most
+        # importantly, cancelled (DELETE /pool/jobs/<id> sets it to "failed" without ever
+        # touching assigned_node_id) - don't touch it either. Without this, a task cancelled
+        # while still queued and not yet picked up by this tick's process_queue batch gets
+        # silently resurrected back to "pending" the moment this function's own "no capacity"
+        # fallback runs, because that fallback unconditionally sets status = "pending" with no
+        # idea the row had already been cancelled out from under it a moment earlier.
+        if task.status != "pending":
+            if task.assigned_node_id:
+                return {"status": "already_allocated", "pc": task.assigned_pc}
+            return {"status": task.status, "message": "task is no longer pending"}
 
         if task.mode == "job":
             # Compute jobs ask for exactly what they need (chosen by the student)
