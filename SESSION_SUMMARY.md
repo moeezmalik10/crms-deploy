@@ -266,6 +266,16 @@ appeared. 8 new tests in a new `ids/tests/` (this service had none before).
   change, and every job-type addition and bug fix re-verified directly against the live backend
   after deploy (see §5).
 
+## 8. CI pipeline
+
+The last fixable item from "known gaps": `.github/workflows/ci.yml` now runs on every push/PR
+to `main` - three jobs (backend tests, IDS tests, frontend build), tests/build only, never a
+deploy; Render's own auto-deploy (`render.yaml`) is separate and unaffected. Verified against
+genuinely fresh installs before pushing (new venvs built from scratch, a clean `npm ci`, not the
+already-populated local environments used all session), then confirmed again on the real
+first-ever GitHub Actions run on this repo (run #1, commit `f254ef5`): **Success**, all three
+jobs passed, 55 seconds total - not just "works locally."
+
 ## Known gaps / not done in this session
 
 Per the proposal's own component breakdown, these are explicitly **other team members'
@@ -279,7 +289,6 @@ scope** and were intentionally left alone:
   remains in place; worth a conversation with the team about how it's credited
 
 Also still open:
-- No CI pipeline (nothing runs tests/build automatically on push).
 - The platform still runs on Render/Vercel/Supabase, not the updated proposal's target
   self-hosted campus server (Ubuntu, Docker microservices behind Nginx, PostgreSQL, MinIO,
   Guacamole) — a full infrastructure migration, not attempted here; this is a whole-team,
