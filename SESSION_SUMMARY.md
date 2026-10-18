@@ -218,6 +218,29 @@ live.
   again after 20s (spanning a full `process_queue` cycle) - all held as `"failed"`, no
   resurrection.
 
+## 7. IDS model_loader.py RCE vector — closed
+
+The one item left on the "known gaps" list from §4 that was actually fixable without another
+team member's component: `ids/ids/model_loader.py` downloaded a pickle from a public Google
+Drive link at startup and deserialized it with plain `pickle.load()` - a crafted `__reduce__`
+in that file could run arbitrary code (classically `os.system`/`subprocess.Popen`) the instant
+it's deserialized, with nothing in between to object. Two independent gates now stand between
+that download and the running service:
+
+- **Pinned SHA-256 hash**, computed from the exact file already in production, checked on
+  every load (not just right after a fresh download - a cached file could be swapped or
+  corrupted since).
+- **A restricted unpickler** whose `find_class()` only allows the 8 classes the real
+  `RandomForestClassifier` actually needs (its own structure plus numpy's array-reconstruction
+  helpers) - discovered by statically walking the pickle's own opcode stream before ever
+  trusting it, not by guessing. Anything else is refused outright.
+
+Verified, not assumed: the real production model file still loads correctly (same
+`RandomForestClassifier`, 78 features); a deliberately-corrupted copy is rejected by the hash
+check and fails safe to the existing rule-based-only mode; a genuine crafted
+`os.system(...)` payload was blocked before execution - the file it would have written never
+appeared. 8 new tests in a new `ids/tests/` (this service had none before).
+
 ## Testing
 
 - `backend/tests/` (pytest): **84 tests** total — the original 38 (quotas, scheduler/priority,
@@ -232,6 +255,9 @@ live.
 - `backend/tests/real_exec/`: a separate harness (not part of the pytest suite) that actually
   trains real Random Forest trees through a real polling agent against a real running server -
   see its own README; this is what caught the checkpoint-verification gap above.
+- `ids/tests/` (pytest): **8 tests**, new - this service had no test coverage before §7. Covers
+  the pinned-hash check and the restricted unpickler, including a real `os.system(...)` and a
+  real `eval(...)` payload that must both be blocked.
 - SQLite doesn't enforce foreign keys or CHECK constraints the same way Postgres does by
   default — the FK enforcement listener from Phase 1 covers foreign keys; the Phase 2 ledger
   CHECK constraint is declared directly on the model so SQLite enforces it too, confirmed by a
@@ -253,8 +279,6 @@ scope** and were intentionally left alone:
   remains in place; worth a conversation with the team about how it's credited
 
 Also still open:
-- `ids/ids/model_loader.py` downloads and unpickles a model from an unauthenticated public
-  Google Drive link at startup — a real (if low-likelihood) RCE vector, flagged but not fixed.
 - No CI pipeline (nothing runs tests/build automatically on push).
 - The platform still runs on Render/Vercel/Supabase, not the updated proposal's target
   self-hosted campus server (Ubuntu, Docker microservices behind Nginx, PostgreSQL, MinIO,
