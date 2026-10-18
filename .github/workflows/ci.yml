@@ -1,0 +1,62 @@
+name: CI
+
+# Runs the project's automated checks on every push and pull request - tests and build only,
+# never a deploy. Render's own auto-deploy (see render.yaml) is separate and unaffected: a red
+# check here does not block or trigger anything on Render, it's purely a signal on the commit/PR.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: Backend tests (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      # No env vars needed here: tests/conftest.py sets its own safe defaults for everything
+      # (JWT secret, a fresh sqlite file per test, DISABLE_SCHEDULER, empty Supabase/IDS urls) -
+      # the same thing that lets these tests run locally with zero configuration.
+      - run: python -m pytest tests/ -v
+
+  ids-tests:
+    name: IDS service tests (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ids
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ids/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m pytest tests/ -v
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
