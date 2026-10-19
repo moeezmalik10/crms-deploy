@@ -276,17 +276,36 @@ already-populated local environments used all session), then confirmed again on 
 first-ever GitHub Actions run on this repo (run #1, commit `f254ef5`): **Success**, all three
 jobs passed, 55 seconds total - not just "works locally."
 
+## 9. Team communication and handoff docs
+
+- Opened [issue #1](https://github.com/moeezmalik10/crms-deploy/issues/1) on the repo to raise
+  the pool-consolidation credit question with the team (tagging `@AreejFatima27`, the only other
+  GitHub collaborator, to relay to Laiba and Maryam) rather than deciding it unilaterally.
+  Resolved and closed: **shared credit — consolidation is co-owned by R3 and R4** going forward;
+  the code and tests (`allocation_engine.py::_consolidate`,
+  `backend/tests/test_r3_consolidation.py`) are unchanged.
+- Drafted planning documents (not implementations) for the other three team members' individually
+  graded components, so each person starts from an accurate picture of the current codebase
+  instead of from zero: [`docs/handoff/R1_resilience_plan.md`](docs/handoff/R1_resilience_plan.md)
+  (Areej — PC-level self-healing), [`docs/handoff/R2_explainable_ids_plan.md`
+  ](docs/handoff/R2_explainable_ids_plan.md) (Laiba — request-level explainable IDS),
+  [`docs/handoff/R4_sessions_gateway_plan.md`](docs/handoff/R4_sessions_gateway_plan.md) (Maryam —
+  VM slot pool, remote-access gateway, and the now-co-owned consolidation code). Each cites exact
+  files/functions already built, what's genuinely missing, and a suggested order — deliberately no
+  code written against them, since building a teammate's individually-graded component for them
+  would misrepresent whose work is being evaluated.
+
 ## Known gaps / not done in this session
 
 Per the proposal's own component breakdown, these are explicitly **other team members'
-scope** and were intentionally left alone:
+scope** and were intentionally left alone (see §9 for the handoff plans):
 - Lease-based fault tolerance / checkpoint-resume for *sessions and PC-level self-healing*
   beyond the job-level recovery fixed in Phase 2 (R1 — Areej)
 - Explainable SHAP-based intrusion detection on request-level features (R2 — Laiba)
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4 — Maryam)
-- Pool consolidation is now explicitly listed under R4 in the updated proposal's team-area
-  table, not R3 — it was built here anyway (explicitly approved earlier in the session) and
-  remains in place; worth a conversation with the team about how it's credited
+- Pool consolidation is listed under R4 in the updated proposal's team-area table, not R3 — it
+  was built here anyway (explicitly approved earlier in the session) and remains in place.
+  **Resolved in §9**: shared credit between R3 and R4, tracked in issue #1 (closed).
 
 Also still open:
 - The platform still runs on Render/Vercel/Supabase, not the updated proposal's target
