@@ -1,7 +1,9 @@
 from datetime import datetime, timezone, timedelta
 from app import db, scheduler
 from app.models import TaskRequest, Node, NodeMetricsHistory
-from app.allocation_engine import allocate_task, stop_task, release_node_tasks, log_event
+from app.allocation_engine import (
+    allocate_task, stop_task, release_node_tasks, log_event, register_node_failure,
+)
 
 METRICS_HISTORY_DAYS = 7
 
@@ -65,6 +67,7 @@ def cleanup_system():
 
         for node in dead_nodes:
             node.status = "offline"
+            register_node_failure(node)
             requeued, failed = release_node_tasks(node, "node heartbeat timeout")
             print(f"Node {node.name} marked offline. {requeued} task(s) re-queued, {failed} failed.")
         

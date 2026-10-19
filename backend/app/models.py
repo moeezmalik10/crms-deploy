@@ -75,6 +75,16 @@ class Node(db.Model):
     reserved_cores = db.Column(db.Float, default=0.0, nullable=False)
     reserved_ram_mb = db.Column(db.Float, default=0.0, nullable=False)
 
+    # ---- Quarantine (PCs that fail repeatedly are temporarily taken out of the pool) ----
+    # consecutive_failures counts heartbeat-timeout failures since the last successful
+    # heartbeat (app.allocation_engine.register_node_failure/clear_node_failure); once it
+    # crosses the threshold, quarantined_until holds a cooldown timestamp that
+    # lock_online_nodes()/fitting_device_count() exclude the node until, even if it starts
+    # heartbeating again in the meantime - a flapping PC shouldn't re-enter scheduling the
+    # instant one heartbeat lands. Null means "not quarantined."
+    consecutive_failures = db.Column(db.Integer, default=0, nullable=False)
+    quarantined_until = db.Column(db.DateTime(timezone=True), nullable=True)
+
     metrics = db.relationship("NodeMetrics", backref="node", lazy=True)
     tasks = db.relationship("TaskRequest", backref="assigned_node", lazy=True)
     # Link for easier log auditing

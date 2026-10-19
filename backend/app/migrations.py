@@ -46,6 +46,11 @@ NEW_COLUMNS = {
     ],
 }
 
+NEW_COLUMNS["node"].extend([
+    ("consecutive_failures", "INTEGER DEFAULT 0 NOT NULL"),
+    ("quarantined_until", "TIMESTAMPTZ"),
+])
+
 # (table, constraint name, check expression) - added in their own try/except below, after the
 # columns above exist. Every existing row already has used/reserved = 0 from the column
 # defaults, so the constraint holds immediately; no backfill or NOT VALID needed.

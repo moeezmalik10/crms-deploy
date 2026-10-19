@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from app import db
 from app.models import Node, NodeMetrics, NodeMetricsHistory, TaskRequest
 from app.pool_security import agent_auth, task_belongs_to_caller, client_public_ip
-from app.allocation_engine import stop_task, log_event, release_node_tasks 
+from app.allocation_engine import stop_task, log_event, release_node_tasks, clear_node_failure
 from sqlalchemy import or_
 
 agent_bp = Blueprint("agent", __name__)
@@ -77,9 +77,10 @@ def register_node():
     _apply_hardware(node, data)
     node.status = "online"
     node.last_heartbeat = datetime.now(timezone.utc)
-    
+    clear_node_failure(node)
+
     db.session.commit()
-    print(f"DATABASE CHECK: Node {node.name} updated.") 
+    print(f"DATABASE CHECK: Node {node.name} updated.")
     return jsonify({"node_id": node.id, "ram_in_db": node.total_ram_mb, "status": "registered",
                     "settings": _settings(node)}), 200
 
@@ -101,7 +102,8 @@ def agent_heartbeat():
 
     node.status = "online"
     node.last_heartbeat = datetime.now(timezone.utc)
-    
+    clear_node_failure(node)
+
     metrics = NodeMetrics.query.filter_by(node_id=node.id).first()
     if not metrics:
         metrics = NodeMetrics(node_id=node.id)

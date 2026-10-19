@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone, timedelta
 from app import db
 from app.models import Node, TaskRequest, TaskExecutionLog, NodeMetrics
@@ -27,6 +28,40 @@ PRIORITY_BATCH = 50
 
 def default_priority(mode):
     return PRIORITY_INTERACTIVE if mode in ("physical", "remote") else PRIORITY_BATCH
+
+
+# Node quarantine ("PCs that fail repeatedly are temporarily taken out of the pool"): a node
+# crossing this many consecutive heartbeat-timeout failures is excluded from scheduling for a
+# cooldown period, rather than becoming eligible again the instant a single heartbeat lands -
+# a flapping PC would otherwise bounce work back and forth every cycle.
+QUARANTINE_FAILURE_THRESHOLD = int(os.environ.get("QUARANTINE_FAILURE_THRESHOLD", "3"))
+QUARANTINE_COOLDOWN_SECONDS = int(os.environ.get("QUARANTINE_COOLDOWN_SECONDS", "600"))
+
+
+def register_node_failure(node):
+    """Call when a node is detected dead (heartbeat timeout). Tracks repeated failures and, once
+    the node crosses the threshold, sets quarantined_until so lock_online_nodes()/
+    fitting_device_count() stop offering it new work for the cooldown - even if it starts
+    heartbeating again before the cooldown ends (see clear_node_failure)."""
+    node.consecutive_failures = (node.consecutive_failures or 0) + 1
+    if node.consecutive_failures >= QUARANTINE_FAILURE_THRESHOLD:
+        node.quarantined_until = datetime.now(timezone.utc) + timedelta(seconds=QUARANTINE_COOLDOWN_SECONDS)
+
+
+def clear_node_failure(node):
+    """Call on every successful heartbeat/registration - a node that's answering again had its
+    last failure streak broken. This resets the counter so old failures don't count toward a
+    future quarantine, but deliberately does NOT clear an active quarantined_until: per the
+    proposal a repeatedly-flapping PC is held out for the full cooldown (or until an admin
+    clears it manually), not re-admitted the moment it next answers."""
+    if node.consecutive_failures:
+        node.consecutive_failures = 0
+
+
+def _not_quarantined():
+    """Node.quarantined_until is NULL, or its cooldown has already passed."""
+    now = datetime.now(timezone.utc)
+    return db.or_(Node.quarantined_until.is_(None), Node.quarantined_until <= now)
 
 
 def _consolidate(task, nodes, usage_map, active_tasks, profile):
@@ -106,7 +141,8 @@ def lock_online_nodes():
     timeout_limit = datetime.now(timezone.utc) - timedelta(seconds=45)
     return Node.query.filter(
         Node.status == 'online',
-        Node.last_heartbeat > timeout_limit
+        Node.last_heartbeat > timeout_limit,
+        _not_quarantined()
     ).order_by(Node.id).with_for_update(of=Node).all()
 
 
@@ -193,7 +229,7 @@ def fitting_device_count(cpu, ram_mb):
     a few seconds instead of running immediately."""
     count = 0
     for n in Node.query.filter(Node.status == "online", Node.device_key_hash.isnot(None),
-                                Node.paused.is_(False)).all():
+                                Node.paused.is_(False), _not_quarantined()).all():
         if not (n.sandbox_mode in ("docker", "isolated") or
                 (n.sandbox_mode == "light" and n.allow_light_sandbox)):
             continue
