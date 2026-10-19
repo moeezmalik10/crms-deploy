@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.allocation_engine import (
     QUARANTINE_FAILURE_THRESHOLD,
+    QUARANTINE_STABILITY_WINDOW_SECONDS,
     clear_node_failure,
     fitting_device_count,
     lock_online_nodes,
@@ -49,11 +50,52 @@ def test_crossing_the_threshold_quarantines_the_node(app, db, make_node):
     assert n.quarantined_until.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc)
 
 
-def test_a_successful_heartbeat_resets_the_streak_but_not_an_active_quarantine(app, db, make_node):
-    """A node that answers again shouldn't carry old failures into a future quarantine, but a
-    quarantine already in effect holds for its full cooldown - it isn't lifted just because the
-    flapping PC happened to answer once more during the cooldown window."""
+def test_a_heartbeat_soon_after_a_failure_does_not_erase_the_streak(app, db, make_node):
+    """The bug this design fixes: a node is only ever re-flagged as failed once per distinct
+    outage (its status already left "online" the moment cleanup_system first caught it), so
+    "repeatedly" necessarily spans separate online/offline cycles. If a heartbeat landing right
+    after the first failure reset the counter to 0 immediately, a second outage could never add
+    to it and the threshold would be unreachable - so a heartbeat inside the stability window
+    must leave the streak alone."""
     node = make_node("FLAKY-C")
+    node_id = node.id
+
+    with app.app_context():
+        n = Node.query.get(node_id)
+        register_node_failure(n)
+        db.session.commit()
+
+        clear_node_failure(n)   # "the node answered again" - moments later, same outage window
+        db.session.commit()
+
+    db.session.expire_all()
+    n = Node.query.get(node_id)
+    assert n.consecutive_failures == 1
+
+
+def test_a_heartbeat_after_the_stability_window_does_reset_the_streak(app, db, make_node):
+    node = make_node("FLAKY-D")
+    node_id = node.id
+
+    with app.app_context():
+        n = Node.query.get(node_id)
+        register_node_failure(n)
+        n.last_failure_at = (datetime.now(timezone.utc)
+                              - timedelta(seconds=QUARANTINE_STABILITY_WINDOW_SECONDS + 1))
+        db.session.commit()
+
+        clear_node_failure(n)   # genuinely stable since then - safe to forgive
+        db.session.commit()
+
+    db.session.expire_all()
+    n = Node.query.get(node_id)
+    assert n.consecutive_failures == 0
+
+
+def test_an_active_quarantine_is_not_lifted_by_a_later_heartbeat(app, db, make_node):
+    """A quarantine already in effect holds for its full cooldown - it isn't lifted just because
+    the flapping PC happened to answer once more during the cooldown window."""
+    node = make_node("FLAKY-E")
     node_id = node.id
 
     with app.app_context():
@@ -68,7 +110,6 @@ def test_a_successful_heartbeat_resets_the_streak_but_not_an_active_quarantine(a
 
     db.session.expire_all()
     n = Node.query.get(node_id)
-    assert n.consecutive_failures == 0
     assert n.quarantined_until == quarantined_at
 
 

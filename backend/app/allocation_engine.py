@@ -34,8 +34,17 @@ def default_priority(mode):
 # crossing this many consecutive heartbeat-timeout failures is excluded from scheduling for a
 # cooldown period, rather than becoming eligible again the instant a single heartbeat lands -
 # a flapping PC would otherwise bounce work back and forth every cycle.
+#
+# A node is only ever re-flagged as failed once per distinct outage (cleanup_system's dead-node
+# query requires status == "online", which the first detection already flips to "offline"), so
+# "repeatedly" necessarily spans separate online/offline cycles. clear_node_failure() therefore
+# can't reset the counter the instant any heartbeat lands - a node that goes down, reconnects
+# for a few seconds, and drops again would have its failure history erased before a second
+# outage could ever add to it, making the threshold unreachable in practice. Instead the streak
+# only clears once the node has stayed healthy for a full stability window with no new failure.
 QUARANTINE_FAILURE_THRESHOLD = int(os.environ.get("QUARANTINE_FAILURE_THRESHOLD", "3"))
 QUARANTINE_COOLDOWN_SECONDS = int(os.environ.get("QUARANTINE_COOLDOWN_SECONDS", "600"))
+QUARANTINE_STABILITY_WINDOW_SECONDS = int(os.environ.get("QUARANTINE_STABILITY_WINDOW_SECONDS", "300"))
 
 
 def register_node_failure(node):
@@ -44,17 +53,26 @@ def register_node_failure(node):
     fitting_device_count() stop offering it new work for the cooldown - even if it starts
     heartbeating again before the cooldown ends (see clear_node_failure)."""
     node.consecutive_failures = (node.consecutive_failures or 0) + 1
+    node.last_failure_at = datetime.now(timezone.utc)
     if node.consecutive_failures >= QUARANTINE_FAILURE_THRESHOLD:
         node.quarantined_until = datetime.now(timezone.utc) + timedelta(seconds=QUARANTINE_COOLDOWN_SECONDS)
 
 
 def clear_node_failure(node):
-    """Call on every successful heartbeat/registration - a node that's answering again had its
-    last failure streak broken. This resets the counter so old failures don't count toward a
-    future quarantine, but deliberately does NOT clear an active quarantined_until: per the
-    proposal a repeatedly-flapping PC is held out for the full cooldown (or until an admin
-    clears it manually), not re-admitted the moment it next answers."""
-    if node.consecutive_failures:
+    """Call on every successful heartbeat/registration. Only resets the counter once the node
+    has gone QUARANTINE_STABILITY_WINDOW_SECONDS since its last failure with no new one - a
+    heartbeat landing sooner than that doesn't prove the flapping has stopped, so the streak is
+    left alone and a failure shortly after still counts as "repeated." This deliberately does
+    NOT clear an active quarantined_until: per the proposal a repeatedly-flapping PC is held out
+    for the full cooldown (or until an admin clears it manually), not re-admitted the moment it
+    next answers."""
+    if not node.consecutive_failures:
+        return
+    last_failure = node.last_failure_at
+    if last_failure is not None and last_failure.tzinfo is None:
+        last_failure = last_failure.replace(tzinfo=timezone.utc)   # SQLite drops tzinfo
+    if last_failure is None or (datetime.now(timezone.utc) - last_failure
+                                 >= timedelta(seconds=QUARANTINE_STABILITY_WINDOW_SECONDS)):
         node.consecutive_failures = 0
 
 

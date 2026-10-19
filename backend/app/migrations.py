@@ -48,6 +48,7 @@ NEW_COLUMNS = {
 
 NEW_COLUMNS["node"].extend([
     ("consecutive_failures", "INTEGER DEFAULT 0 NOT NULL"),
+    ("last_failure_at", "TIMESTAMPTZ"),
     ("quarantined_until", "TIMESTAMPTZ"),
 ])
 
