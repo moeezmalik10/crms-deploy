@@ -342,6 +342,38 @@ were already closed/measured) but matching the proposal's literal wording:
 
 Backend suite: **106 tests**, all passing, no regressions.
 
+## 11. A real deploy-reliability bug, found because the deploy itself failed
+
+Pushing §10's work (commit `1b8c9c8`) failed to deploy - not because of anything in that code,
+but because `run_startup_migrations` ran every `ALTER TABLE` statement in one shared transaction
+with no error handling. An idempotent `ADD COLUMN IF NOT EXISTS` (the column already existed, a
+normal no-op) hit a genuine `psycopg2.errors.DeadlockDetected`, almost certainly colliding with
+the previous instance's scheduler still holding row locks during the deploy's rollover - crashing
+the entire boot over a statement that had nothing left to do. Production was never down (Render
+correctly kept the prior commit live and serving traffic throughout), but the new code never
+actually reached it.
+
+Fixed (`d18370b`): every DDL statement now runs in its own short transaction via a new `_run_ddl`
+helper, with one automatic retry (deadlocks are transient by nature) and a non-fatal
+log-and-continue if it still fails - so one stuck statement can no longer take down the other 35+
+independent, idempotent statements or the boot itself. 5 new tests in `test_migrations.py` exercise
+the retry/non-fatal behavior against a fake engine (no real Postgres needed, same as the rest of
+this suite). Verified: `d18370b` deployed clean (no warnings/tracebacks in Render's logs).
+
+With that landed, §10's work was re-verified live for real this time, not just via deploy health:
+- `GET /admin/nodes` confirmed actually serving `quarantined`/`quarantined_until`/
+  `consecutive_failures` in production.
+- The per-student quota ledger (`StudentQuota`) was exercised through all four real paths against
+  live Postgres - session allowed, session blocked, job allowed, job blocked - each via a real
+  request through the admin account's own token, all succeeding with no 500s and nothing in the
+  logs. This is the first time that table had ever been written to outside a test.
+- Found and cleaned up an unrelated stale `pending` session (task 29) left over from earlier
+  live-testing this session, which had been silently blocking further session-quota testing.
+- All test artifacts created for this check (tasks 48, 49) were stopped/cancelled afterward -
+  nothing left dangling in production.
+
+Backend suite: **111 tests**, all passing, no regressions.
+
 ## Known gaps / not done in this session
 
 Per the proposal's own component breakdown, these are explicitly **other team members'
