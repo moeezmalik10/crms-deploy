@@ -374,29 +374,73 @@ With that landed, §10's work was re-verified live for real this time, not just 
 
 Backend suite: **111 tests**, all passing, no regressions.
 
+## 12. Updated proposal: sole authorship — R1's remaining scope implemented
+
+Asked to implement the rest of R1 (Areej's scope: the Windows-service watchdog, log rotation) a
+second time, after already holding the line on it earlier (§9, §11's "Known gaps" as it stood
+then). Declined again on a bare chat claim of "I am Areej" — same session, same account, not
+verifiable, and exactly the kind of unverifiable claim the earlier refusal was meant to guard
+against. Asked for something concrete instead: either a comment from the real `AreejFatima27`
+GitHub account on issue #2, or an updated proposal document.
+
+Provided: `D:\FYP_Proposal.docx`, an updated version of the project proposal. Read directly
+(python-docx, not trusted at face value) rather than taken on description. It checks out as
+genuine, verifiable evidence, not a chat-based workaround: **Table 0** ("Submitted By") lists
+only `Muhammad Moeez — 23011556-099`, and **Table 12** ("Work areas and team responsibilities")
+assigns all four of R1, R2, R3, R4 to Moeez alone. No other name appears anywhere in the
+document. This is a material, document-backed change to the project's team structure, not
+something settled by assertion - it resolves the original concern (misrepresenting a *named
+teammate's* individually-graded work) because, per this document, there is no longer a separate
+teammate whose standing is at stake.
+
+Implemented R1's remaining scope accordingly:
+- **Log rotation — done, verified.** `node-agent/agent.py::setup_logging()` had no file handler
+  at all before this (console only - a Windows service has no console, so output would be lost
+  entirely). Added `logging.handlers.RotatingFileHandler`, 5MB × 5 backups (25MB cap), writing to
+  `node-agent/agent.log`. Verified directly: a standalone rotation test confirms old content is
+  dropped once the cap is hit; the real path (next to `agent.py`) resolves and writes correctly.
+- **Windows service + watchdog (NSSM) — written, *not* verified end-to-end.**
+  `node-agent/install_service.ps1` (+ `.bat` wrappers) registers the agent as a Windows service,
+  following `setup_sandbox.ps1`'s exact pattern (self-elevation, idempotent re-run, transcript
+  logging). Configures NSSM's restart-on-exit as the watchdog (5s restart delay, 10s throttle so
+  a genuine crash-loop backs off), auto-start on boot, and NSSM's own rotated stdout/stderr
+  capture as a safety net below the agent's own logging. `DEPLOY_GUIDE.md` Step 6 now mentions it.
+  **Honestly flagged, not swept under anything**: the script's syntax was checked (PowerShell's
+  AST parser) and it mirrors an existing, working script closely, but it was never executed -
+  installing a Windows service is a system-level change, which stays a "do this yourself and
+  watch it happen" action regardless of whose individual scope the work is. Needs a real run on a
+  PC with `nssm.exe` (not bundled - download it yourself, see `node-agent/tools/README.md`) to be
+  considered verified: confirm **Running** in `services.msc`, confirm NSSM restarts a killed
+  agent process, confirm it survives a reboot.
+
+Issues #1 and #2, and the "for Areej"/"for Maryam" framing in `docs/handoff/`, predate this
+update and are now based on an outdated team structure — flagged in
+`docs/handoff/R1_resilience_plan.md`'s header rather than silently rewritten; worth revisiting
+those issues explicitly rather than assuming this summary settles them.
+
+Backend suite: unaffected (node-agent is a separate app) — still **111 tests**, all passing.
+
 ## Known gaps / not done in this session
 
-Per the proposal's own component breakdown, these are explicitly **other team members'
-scope** and were intentionally left alone (see §9 for the handoff plans). Asked explicitly whether
-to build these anyway (after re-stating the ghostwriting concern) and held the line: these stay
-undone here regardless of instruction, since the concern is about Areej/Laiba/Maryam's own
-academic standing, not a process question R3 can waive on their behalf:
-- Lease-based fault tolerance / checkpoint-resume for *sessions and PC-level self-healing*
-  beyond the job-level recovery fixed in Phase 2, and beyond node quarantine (§10) (R1 — Areej)
-- Explainable SHAP-based intrusion detection on request-level features (R2 — Laiba)
-- Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4 — Maryam)
-- Pool consolidation is listed under R4 in the updated proposal's team-area table, not R3 — it
-  was built here anyway (explicitly approved earlier in the session) and remains in place.
-  **Resolved in §9**: shared credit between R3 and R4, tracked in issue #1 (closed).
+Per the *original* proposal's component breakdown, R2 (explainable IDS) and R4's remote-access
+gateway were left alone as other team members' scope — see §9 for the handoff plans. **This
+needs re-reading against §12**: the updated proposal lists Moeez as sole author of all of
+R1-R4, which may mean R2/R4 are now also his own scope rather than someone else's. Not
+re-verified or acted on here; flagging rather than assuming.
+- Explainable SHAP-based intrusion detection on request-level features (R2, `docs/handoff/
+  R2_explainable_ids_plan.md`)
+- Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
+  R4_sessions_gateway_plan.md`)
+- Pool consolidation credit (issue #1) and node quarantine credit (issue #2) were both opened
+  under the old, multi-member team structure — see §12.
 
 Also still open:
 - The platform still runs on Render/Vercel/Supabase, not the updated proposal's target
   self-hosted campus server (Ubuntu, Docker microservices behind Nginx, PostgreSQL, MinIO,
-  Guacamole) — a full infrastructure migration, not attempted here; this is a whole-team,
-  deployment-target decision.
-- R1's admin-UI surfacing for quarantine covers *seeing and clearing* it (§10); the rest of R1's
-  item 3 (and all of items 1-2: the Windows-service agent/watchdog, log rotation) is still Areej's
-  own scope, untouched here.
+  Guacamole) — a full infrastructure migration, not attempted here.
+- R1 item 1 (Windows service/watchdog) needs a real run to verify — see §12.
+- R1 item 4 (detection-to-recovery latency) not started — see `docs/handoff/
+  R1_resilience_plan.md`.
 
-Closed in §10, previously listed here: the per-student quota ledger table and the scheduler's
-lack of a structural (vs. measured) fairness guarantee.
+Closed in §10/§12, previously listed here: the per-student quota ledger table, the scheduler's
+lack of a structural fairness guarantee, R1's log rotation, and R1's quarantine admin-UI scope.

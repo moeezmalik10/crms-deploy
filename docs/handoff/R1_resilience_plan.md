@@ -1,6 +1,11 @@
 # R1 handoff: PC-level self-healing (Resilience Service)
 
-**For:** Areej Fatima
+**For:** Areej Fatima, originally.
+**Note (2026-10-21):** an updated `FYP_Proposal.docx` lists Muhammad Moeez as the sole author
+across all of R1-R4 (Table 0, Table 12) - no other names appear in it. This doc's "for Areej"
+framing below is historical context for how it was written, not the current team structure;
+items 1-3 are now implemented as Moeez's own work (see their entries below for what's verified
+vs. not). Issues #1 and #2 predate this and should be revisited.
 **Written by:** an AI assistant working with Muhammad Moeez on his own R3 scope, at his request, as
 a starting point for you — not a substitute for your own work. Everything here is a plan to
 review, adjust, and implement yourself; nothing in this file has been coded for you.
@@ -48,25 +53,31 @@ resilient (service + watchdog + log rotation).
 
 ## What's genuinely missing
 
-### 1. Agent as a Windows service with a watchdog
-Right now the agent is started manually via `node-agent/start_agent.bat`
-(`venv\Scripts\python.exe agent.py`) — if it crashes, nothing restarts it, and if the PC reboots,
-nothing starts it back up. The project's own tools list already names **NSSM** for exactly this
-(`backend/requirements.txt`'s tools table isn't it — check `DEPLOY_GUIDE.md` and the proposal's
-Table 14: "psutil and NSSM — Node agent metrics and service... runs the agent as a Windows
-service with automatic restart").
+### 1. Agent as a Windows service with a watchdog — written, needs a real run to verify
+`node-agent/install_service.ps1` (+ `install_service.bat`/`uninstall_service.bat`) registers
+`agent.py` as a Windows service via NSSM, following `setup_sandbox.ps1`'s exact pattern
+(self-elevation, a `Run-Native` helper, transcript logging to `install_service.log`, idempotent
+re-run). Configures NSSM's own restart-on-exit as the watchdog (`AppExit Default Restart`,
+`AppRestartDelay` 5s, `AppThrottle` 10s so a genuine crash-loop backs off instead of spinning),
+auto-start on boot, and NSSM's own rotated stdout/stderr capture as a safety net below the
+agent's own logging. `DEPLOY_GUIDE.md` Step 6 now mentions it as the option for a lab PC that
+should stay in the pool unattended.
 
-- Write an NSSM install script (`node-agent/install_service.bat` or similar) that registers
-  `agent.py` as a Windows service, with NSSM's own restart-on-exit behavior as the watchdog layer.
-- Decide and document the restart policy (NSSM supports throttling so a crash-loop doesn't spin
-  forever).
-- Update `DEPLOY_GUIDE.md` / the Contribute page's install steps once this exists, so a
-  contributing student gets the resilient version by default, not the manual batch-file version.
+**What's actually verified vs. not**: the script's syntax is checked (PowerShell's own AST
+parser) and it mirrors `setup_sandbox.ps1` closely, but it was never executed - installing a
+Windows service is a system-level change, not something done without you directly running it
+and watching what happens. Before trusting it: run `install_service.bat` on a real PC (you'll
+need `nssm.exe` from nssm.cc first - see `node-agent/tools/README.md`), confirm the service
+shows **Running** in `services.msc`, kill the agent process and confirm NSSM restarts it, and
+reboot the PC to confirm it comes back on its own.
 
-### 2. Log rotation
-`node-agent/agent.py::setup_logging()` — check what it does today; if it's an unbounded file
-handler, a service running for weeks will grow that file forever. Use Python's
-`logging.handlers.RotatingFileHandler` (stdlib, no new dependency) with a sane size/backup-count.
+### 2. Log rotation — done, verified
+`node-agent/agent.py::setup_logging()` had no file handler at all before this - console-only,
+so a service with no visible console would lose all log output. Added a
+`logging.handlers.RotatingFileHandler` (stdlib) writing to `node-agent/agent.log`, capped at
+5MB × 5 backups (25MB total). Verified directly: a standalone rotation test confirms old
+content is dropped once the cap is hit, and the real path (next to `agent.py`) resolves and
+writes correctly.
 
 ### 3. Node quarantine after repeated failures — DONE, read before changing anything
 The proposal: "PCs that fail repeatedly are temporarily taken out of the pool." Built and live in
@@ -111,12 +122,13 @@ honest options, worth a conversation with R3:
   building as a separate, shorter-timeout mechanism is a real tradeoff to weigh, not something to
   default into.
 
-## Suggested order
-1. Read `backend/tests/test_node_quarantine.py` and the quarantine code it covers (item 3) —
-   you're taking ownership of this, so understand it before anything else.
-2. Service + watchdog (NSSM) — immediately useful even standalone, low risk.
-3. Log rotation — small, independent, do it alongside #2 since you're already in `agent.py`.
-4. Revisit detection latency once the above are in and you can measure real numbers.
+## Suggested order (status as of 2026-10-21)
+1. ~~Service + watchdog (NSSM)~~ — script written (item 1), **not yet run on a real PC**. Do
+   this first: install `nssm.exe`, run `install_service.bat`, confirm it actually restarts the
+   agent on a kill and on reboot.
+2. ~~Log rotation~~ — done and verified (item 2).
+3. ~~Node quarantine~~ — done and verified live (item 3).
+4. Revisit detection latency (item 4) once #1 is confirmed working for real.
 
 ## Testing
 `backend/tests/test_node_quarantine.py` (15 tests) covers node quarantine — counter

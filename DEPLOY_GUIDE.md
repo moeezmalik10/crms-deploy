@@ -177,6 +177,13 @@ crms-deploy\
 - `CHECK_DEPLOY.bat nodes` → your PC (e.g. **MOEEZ**) is **online**.
 - The website's **Machines** page shows it with live CPU and RAM.
 
+**For a lab PC that should stay in the pool unattended** (not just a quick test), run
+`install_service.bat` instead of keeping `start_agent.bat`'s window open: it registers the
+agent as a Windows service that starts on boot and restarts itself automatically if it crashes,
+using [NSSM](https://nssm.cc/download) as the watchdog (see `node-agent/install_service.ps1`
+for what it does and where to put `nssm.exe`). `uninstall_service.bat` undoes it. The agent's
+own logs rotate automatically (`node-agent/agent.log`, capped at 25MB) either way.
+
 ---
 
 ## Step 7 – Second PC joins the pool

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 
 app = Flask(__name__)
 CORS(app)
@@ -19,14 +20,25 @@ CORS(app)
 # =====================
 # LOGGING SETUP
 # =====================
+# 5MB x 5 backups = 25MB cap per PC. Running as a Windows service (R1's NSSM watchdog) has no
+# visible console, so a log file isn't optional there - without one, a crash hours into a run
+# would leave nothing to diagnose it from. RotatingFileHandler caps total disk use so a service
+# running for weeks doesn't grow this file forever, the way an unbounded handler would.
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+
+
 def setup_logging():
     log_format  = "%(asctime)s [%(levelname)s] %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(log_format, date_format)
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(logging.Formatter(log_format, date_format))
+    console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
     import builtins
     def logged_print(*args, **kwargs):
         msg = " ".join(str(a) for a in args)
