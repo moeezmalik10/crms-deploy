@@ -2,7 +2,8 @@ from datetime import datetime, timezone, timedelta
 from app import db, scheduler
 from app.models import TaskRequest, Node, NodeMetricsHistory
 from app.allocation_engine import (
-    allocate_task, stop_task, release_node_tasks, log_event, register_node_failure,
+    allocate_task, fair_queue_order, stop_task, release_node_tasks, log_event,
+    register_node_failure,
 )
 
 METRICS_HISTORY_DAYS = 7
@@ -11,15 +12,21 @@ METRICS_HISTORY_DAYS = 7
 def process_queue():
     with scheduler.app.app_context():
         try:
-            # Highest priority first (lower number = served first), then oldest first within
-            # a priority tier. A capped batch, not just the oldest 3: with a fixed limit(3)
-            # ordered only by created_at, 3 requests stuck waiting for capacity would silently
-            # block every other pending request behind them from ever being attempted, no
-            # matter how small or how long it had been waiting.
-            queued_tasks = TaskRequest.query.filter(
+            # Highest priority first (lower number = served first). A capped batch, not just
+            # the oldest 3: with a fixed limit(3) ordered only by created_at, 3 requests stuck
+            # waiting for capacity would silently block every other pending request behind
+            # them from ever being attempted, no matter how small or how long it had been
+            # waiting.
+            #
+            # Pull a wider candidate pool than the batch size and let fair_queue_order()
+            # round-robin it by student before truncating to 20 - plain created_at FIFO within
+            # a tier gives no structural guarantee against one student's burst of submissions
+            # occupying the whole batch ahead of a single request from someone else.
+            candidates = TaskRequest.query.filter(
                 TaskRequest.status == "pending",
                 TaskRequest.assigned_node_id.is_(None)
-            ).order_by(TaskRequest.priority.asc(), TaskRequest.created_at.asc()).limit(20).all()
+            ).order_by(TaskRequest.priority.asc(), TaskRequest.created_at.asc()).limit(200).all()
+            queued_tasks = fair_queue_order(candidates)[:20]
 
             for task in queued_tasks:
                 # Use a try block inside the loop so one bad task doesn't kill the whole queue

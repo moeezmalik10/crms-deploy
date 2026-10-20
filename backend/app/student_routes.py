@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from app import db
 from app.models import User, TaskRequest, MLResult
 from app.allocation_engine import allocate_task, default_priority, higher_or_equal_priority_pending, stop_task, log_event
-from app.quotas import session_quota_message
+from app.quotas import refresh_student_quota, session_quota_message
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 
 student_bp = Blueprint("student", __name__)
@@ -55,6 +55,10 @@ def request_task_frontend():
         created_at=datetime.now(timezone.utc)
     )
     db.session.add(task)
+    # Re-snapshot the ledger now that this task exists, in the same transaction the lock from
+    # session_quota_message() above is still holding - otherwise the row would commit showing
+    # the count from just before this request, not including it.
+    refresh_student_quota(user_id)
     db.session.commit()
     log_event(task.id, None, "pending", "Task created by student")
     db.session.commit()  # Commit the log entry

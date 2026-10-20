@@ -187,3 +187,97 @@ def test_cleanup_system_quarantines_a_node_that_keeps_timing_out(app, db, make_n
         db.session.commit()
 
     assert node_id not in candidates
+
+
+# ---------------------------------------------------------------- admin-UI surfacing
+# backend/app/admin_routes.py::clear_quarantine and the quarantine fields on GET /admin/nodes
+# and GET /pool/devices (app/pool_routes.py::_device_json) - the frontend surfacing in
+# Machines.jsx / PoolDashboard.jsx reads these same fields.
+
+def test_admin_nodes_reports_quarantine_state(app, db, make_user, make_node, client, auth):
+    admin = make_user("qadmin1", "qadmin1@uog.edu.pk", role="admin")
+    node = make_node(
+        "ADMIN-VIEW-QUARANTINED", device_key_hash="aq1",
+        consecutive_failures=QUARANTINE_FAILURE_THRESHOLD,
+        quarantined_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    r = client.get("/admin/nodes", headers=auth(admin, role="admin"))
+    assert r.status_code == 200
+    row = next(n for n in r.get_json() if n["id"] == node.id)
+    assert row["quarantined"] is True
+    assert row["consecutive_failures"] == QUARANTINE_FAILURE_THRESHOLD
+    assert row["quarantined_until"] is not None
+
+
+def test_clear_quarantine_requires_admin(app, db, make_user, make_node, client, auth):
+    student = make_user("qstudent1", "qstudent1@uog.edu.pk")
+    node = make_node("NOT-YOUR-NODE", device_key_hash="aq2",
+                      quarantined_until=datetime.now(timezone.utc) + timedelta(minutes=5))
+
+    r = client.post(f"/admin/nodes/{node.id}/clear_quarantine", headers=auth(student))
+    assert r.status_code == 403
+
+
+def test_clear_quarantine_releases_the_node(app, db, make_user, make_node, client, auth):
+    admin = make_user("qadmin2", "qadmin2@uog.edu.pk", role="admin")
+    node = make_node(
+        "ADMIN-CLEARS-ME", device_key_hash="aq3",
+        consecutive_failures=QUARANTINE_FAILURE_THRESHOLD,
+        quarantined_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    node_id = node.id
+
+    r = client.post(f"/admin/nodes/{node_id}/clear_quarantine", headers=auth(admin, role="admin"))
+    assert r.status_code == 200
+
+    db.session.expire_all()
+    n = Node.query.get(node_id)
+    assert n.consecutive_failures == 0
+    assert n.last_failure_at is None
+    assert n.quarantined_until is None
+
+
+def test_pool_devices_reports_quarantine_to_the_owner(app, db, make_user, make_node, client, auth):
+    owner = make_user("qowner1", "qowner1@uog.edu.pk")
+    node = make_node(
+        "OWNED-QUARANTINED", device_key_hash="aq4", owner_user_id=owner.id,
+        quarantined_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    r = client.get("/pool/devices?mine=1", headers=auth(owner))
+    assert r.status_code == 200
+    row = next(d for d in r.get_json() if d["id"] == node.id)
+    assert row["quarantined"] is True
+
+
+def test_owner_can_clear_their_own_devices_quarantine(app, db, make_user, make_node, client, auth):
+    owner = make_user("qowner2", "qowner2@uog.edu.pk")
+    node = make_node(
+        "OWNER-CLEARS-OWN", device_key_hash="aq5", owner_user_id=owner.id,
+        consecutive_failures=QUARANTINE_FAILURE_THRESHOLD,
+        quarantined_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    node_id = node.id
+
+    r = client.patch(f"/pool/devices/{node_id}", headers=auth(owner),
+                     json={"clear_quarantine": True})
+    assert r.status_code == 200
+
+    db.session.expire_all()
+    n = Node.query.get(node_id)
+    assert n.quarantined_until is None
+
+
+def test_a_different_student_cannot_clear_someone_elses_quarantine(app, db, make_user, make_node,
+                                                                     client, auth):
+    owner = make_user("qowner3", "qowner3@uog.edu.pk")
+    stranger = make_user("qstranger", "qstranger@uog.edu.pk")
+    node = make_node(
+        "OWNED-BY-SOMEONE-ELSE", device_key_hash="aq6", owner_user_id=owner.id,
+        quarantined_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    r = client.patch(f"/pool/devices/{node.id}", headers=auth(stranger),
+                     json={"clear_quarantine": True})
+    assert r.status_code == 403

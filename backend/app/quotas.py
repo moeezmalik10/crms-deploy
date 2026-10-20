@@ -3,8 +3,10 @@ have pending or running at once, instead of two separate ad-hoc checks drifting 
 Limits are read from the environment so an admin can tune them without a code change.
 """
 import os
+from datetime import datetime, timezone
 
-from app.models import TaskRequest, User
+from app import db
+from app.models import StudentQuota, TaskRequest, User
 
 # A task counts against a quota from the moment it's queued until it finishes - not just
 # while it's actually running - otherwise two requests submitted back to back would both
@@ -51,10 +53,32 @@ def _lock_user(user_id):
     User.query.with_for_update().get(user_id)
 
 
+def refresh_student_quota(user_id):
+    """Persists the proposal's literal per-student quota ledger row - a read-only snapshot,
+    never consulted by session_quota_message/job_quota_message themselves (see StudentQuota's
+    docstring). Does not commit: on the "allowed" path the caller's own eventual commit (after
+    creating the new TaskRequest) carries this write along in the same transaction; on the
+    "blocked" path the caller below commits it directly, since nothing else is pending."""
+    sessions = active_session_count(user_id)
+    jobs = active_job_count(user_id)
+    row = StudentQuota.query.get(user_id)
+    if row is None:
+        row = StudentQuota(user_id=user_id)
+        db.session.add(row)
+    row.active_sessions = sessions
+    row.active_jobs = jobs
+    row.max_sessions = MAX_ACTIVE_SESSIONS
+    row.max_jobs = MAX_ACTIVE_JOBS
+    row.updated_at = datetime.now(timezone.utc)
+    return sessions, jobs
+
+
 def session_quota_message(user_id):
     """None if the user may start another session, otherwise an error string."""
     _lock_user(user_id)
-    if active_session_count(user_id) >= MAX_ACTIVE_SESSIONS:
+    sessions, _ = refresh_student_quota(user_id)
+    if sessions >= MAX_ACTIVE_SESSIONS:
+        db.session.commit()
         return f"You already have an active session (limit {MAX_ACTIVE_SESSIONS})."
     return None
 
@@ -62,6 +86,8 @@ def session_quota_message(user_id):
 def job_quota_message(user_id):
     """None if the user may submit another job, otherwise an error string."""
     _lock_user(user_id)
-    if active_job_count(user_id) >= MAX_ACTIVE_JOBS:
+    _, jobs = refresh_student_quota(user_id)
+    if jobs >= MAX_ACTIVE_JOBS:
+        db.session.commit()
         return f"You already have {MAX_ACTIVE_JOBS} jobs waiting or running."
     return None

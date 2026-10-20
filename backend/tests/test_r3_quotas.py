@@ -65,3 +65,60 @@ def test_job_quota_blocks_a_fourth_job(client, make_user, auth):
     }, content_type="multipart/form-data")
     assert r.status_code == 400
     assert "3 jobs" in r.get_json()["error"]
+
+
+# ---------------------------------------------------------------- StudentQuota ledger
+# The proposal's literal per-student quota ledger row (app.models.StudentQuota) - a read-only
+# mirror, not itself consulted by the quota decision above. See its docstring and
+# app.quotas.refresh_student_quota.
+
+def test_student_quota_ledger_reflects_an_allowed_request(client, make_user, auth):
+    from app.models import StudentQuota
+
+    student = make_user("sq1", "sq1@uog.edu.pk")
+    r = client.post("/tasks/request", headers=auth(student),
+                     json={"task_type": "dev_cpp", "mode": "physical", "duration_minutes": 30})
+    assert r.status_code == 200
+
+    row = StudentQuota.query.get(student.id)
+    assert row is not None
+    assert row.active_sessions == 1
+    assert row.active_jobs == 0
+    assert row.max_sessions > 0 and row.max_jobs > 0
+
+
+def test_student_quota_ledger_is_still_persisted_when_a_request_is_blocked(client, make_user, auth, db):
+    """The ledger write must survive even on the rejected path, where the route returns
+    immediately without ever calling db.session.commit() itself - refresh_student_quota commits
+    it directly in that case (see quotas.session_quota_message)."""
+    from app.models import StudentQuota, TaskRequest
+    from datetime import datetime, timezone
+
+    student = make_user("sq2", "sq2@uog.edu.pk")
+    db.session.add(TaskRequest(user_id=student.id, task_type="dev_cpp", mode="physical",
+                               status="allocated", created_at=datetime.now(timezone.utc)))
+    db.session.commit()
+
+    r = client.post("/tasks/request", headers=auth(student),
+                     json={"task_type": "ubuntu", "mode": "remote", "duration_minutes": 30})
+    assert r.status_code == 400
+
+    db.session.expire_all()
+    row = StudentQuota.query.get(student.id)
+    assert row is not None
+    assert row.active_sessions == 1   # the pre-existing session, not the blocked one
+
+
+def test_student_quota_ledger_tracks_jobs_independently_of_sessions(client, make_user, auth):
+    from app.models import StudentQuota
+
+    student = make_user("sq3", "sq3@uog.edu.pk")
+    r = client.post("/pool/jobs", headers=auth(student), data={
+        "file": (io.BytesIO(b"print(1)"), "main.py"),
+        "runtime": "python", "cores": "1", "ram_mb": "128", "disk_mb": "50", "max_minutes": "1",
+    }, content_type="multipart/form-data")
+    assert r.status_code == 200, r.get_json()
+
+    row = StudentQuota.query.get(student.id)
+    assert row.active_jobs == 1
+    assert row.active_sessions == 0

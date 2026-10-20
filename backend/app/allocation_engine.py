@@ -30,6 +30,41 @@ def default_priority(mode):
     return PRIORITY_INTERACTIVE if mode in ("physical", "remote") else PRIORITY_BATCH
 
 
+def fair_queue_order(tasks):
+    """Round-robin by student within each priority tier, called by app.tasks.process_queue on
+    its candidate batch before allocating. Plain (priority, created_at) FIFO measures fair over
+    a sustained run (see backend/tests/load's 0.9835 Jain's index) but gives no structural
+    guarantee for a short burst: a student who submits several jobs back to back would occupy
+    every slot at the front of the same-tier queue ahead of a single request from someone else
+    who happened to submit a moment later. This groups tasks by (priority, user_id), keeps each
+    student's own tasks in their original created_at order, then takes one task per student per
+    round - so within a tier, every student with at least one pending task gets a turn before
+    any student gets a second. A lone student's own backlog is unaffected: round-robin over one
+    queue is just that queue's existing order."""
+    by_priority = {}
+    for t in tasks:
+        by_priority.setdefault(t.priority, {}).setdefault(t.user_id, []).append(t)
+
+    ordered = []
+    for priority in sorted(by_priority):
+        by_user = by_priority[priority]
+        for queue in by_user.values():
+            queue.sort(key=lambda t: t.created_at)
+        # Whoever currently has the oldest still-pending task at this tier goes first in the
+        # first round, so a tier that's never seen a burst still comes out in plain FIFO order.
+        user_order = sorted(by_user, key=lambda uid: by_user[uid][0].created_at)
+        round_idx = 0
+        remaining = sum(len(q) for q in by_user.values())
+        while remaining:
+            for uid in user_order:
+                queue = by_user[uid]
+                if round_idx < len(queue):
+                    ordered.append(queue[round_idx])
+                    remaining -= 1
+            round_idx += 1
+    return ordered
+
+
 # Node quarantine ("PCs that fail repeatedly are temporarily taken out of the pool"): a node
 # crossing this many consecutive heartbeat-timeout failures is excluded from scheduling for a
 # cooldown period, rather than becoming eligible again the instant a single heartbeat lands -

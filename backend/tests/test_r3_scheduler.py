@@ -6,7 +6,7 @@ believe the same free capacity is available. SQLite has no row-level locking, so
 concurrency guarantee is NOT exercised by these tests - only the single-request behavior is.
 Verifying the lock actually prevents a race needs a real Postgres instance.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def test_default_priority_interactive_outranks_batch():
@@ -118,6 +118,114 @@ def test_process_queue_does_not_starve_behind_unsatisfiable_tasks(app, db, make_
     assert placed.status == "allocated", (
         "a satisfiable request was starved behind unsatisfiable older ones"
     )
+
+
+def test_fair_queue_order_round_robins_within_a_priority_tier():
+    """Unit test against plain fake task objects, independent of the DB: a burst of several
+    same-priority tasks from one "student" must not occupy every early slot ahead of a single
+    task from someone else who has an older task overall but fewer of them."""
+    from collections import namedtuple
+    from datetime import timedelta
+    from app.allocation_engine import fair_queue_order
+
+    Fake = namedtuple("Fake", "id user_id priority created_at")
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # Student A bursts 3 tasks first; student B's single task lands right after A's burst.
+    a1 = Fake("a1", "A", 50, t0)
+    a2 = Fake("a2", "A", 50, t0 + timedelta(seconds=1))
+    a3 = Fake("a3", "A", 50, t0 + timedelta(seconds=2))
+    b1 = Fake("b1", "B", 50, t0 + timedelta(seconds=3))
+
+    order = [t.id for t in fair_queue_order([a1, a2, a3, b1])]
+    assert order == ["a1", "b1", "a2", "a3"]
+
+
+def test_fair_queue_order_respects_priority_tiers_first():
+    """Round-robin only ever reorders within a tier - a higher-priority (lower number) task
+    always still comes before every lower-priority one, burst or not."""
+    from collections import namedtuple
+    from datetime import timedelta
+    from app.allocation_engine import fair_queue_order
+
+    Fake = namedtuple("Fake", "id user_id priority created_at")
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    batch1 = Fake("batch1", "A", 50, t0)
+    batch2 = Fake("batch2", "A", 50, t0 + timedelta(seconds=1))
+    interactive = Fake("interactive", "B", 10, t0 + timedelta(seconds=2))
+
+    order = [t.id for t in fair_queue_order([batch1, batch2, interactive])]
+    assert order == ["interactive", "batch1", "batch2"]
+
+
+def test_fair_queue_order_is_plain_fifo_for_a_single_student():
+    """No behavior change for the common case: one student's own backlog comes out in exactly
+    the order it was submitted."""
+    from collections import namedtuple
+    from datetime import timedelta
+    from app.allocation_engine import fair_queue_order
+
+    Fake = namedtuple("Fake", "id user_id priority created_at")
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    tasks = [Fake(f"t{i}", "A", 50, t0 + timedelta(seconds=i)) for i in range(5)]
+
+    order = [t.id for t in fair_queue_order(tasks)]
+    assert order == ["t0", "t1", "t2", "t3", "t4"]
+
+
+def test_process_queue_serves_a_second_student_in_the_same_tick_as_a_first_students_burst(
+        app, db, make_user, make_node):
+    """The structural gap plain FIFO left: a node with room for exactly 2 concurrent job-mode
+    units, one student bursts 5 queued jobs, a second student's single job lands right after
+    that burst. Under pure (priority, created_at) FIFO the first 2 candidates attempted would
+    both be the bursty student's (starving the second student's request for this whole tick,
+    and potentially several more if the burst is large enough); fair_queue_order's round-robin
+    means the second student's job gets a turn in the very first round instead."""
+    from app.models import TaskRequest
+    from app.tasks import process_queue
+
+    # Sized so exactly 2 concurrent 1-core/1024MB job units fit: buffer_cores = 5% of 4 = 0.2
+    # (cap_cpu 3.8, 2 units use 2), buffer_ram = 768 fixed (cap_ram 2916-768=2148, 2 units use
+    # 2048 but a 3rd would need 3072 > 2148).
+    make_node("FAIR-NODE", total_cores=4, total_ram_mb=2916, status="online",
+             last_heartbeat=datetime.now(timezone.utc), device_key_hash="fair-node-key",
+             sandbox_mode="docker", free_storage_gb=50)
+
+    bursty = make_user("fq_bursty", "fq_bursty@uog.edu.pk")
+    other = make_user("fq_other", "fq_other@uog.edu.pk")
+
+    t0 = datetime.now(timezone.utc)
+    bursty_ids = []
+    for i in range(5):
+        t = TaskRequest(user_id=bursty.id, task_type="job_python", mode="job", status="pending",
+                        priority=50, required_cpu=1, required_ram_mb=1024,
+                        created_at=t0 - timedelta(seconds=10 - i))
+        db.session.add(t)
+        db.session.flush()
+        bursty_ids.append(t.id)
+
+    other_task = TaskRequest(user_id=other.id, task_type="job_python", mode="job", status="pending",
+                             priority=50, required_cpu=1, required_ram_mb=1024,
+                             created_at=t0 - timedelta(seconds=4))   # right after the burst
+    db.session.add(other_task)
+    db.session.commit()
+    other_id = other_task.id
+
+    with app.app_context():
+        process_queue()
+        # Session.get() outside this block would return the identity-mapped Python objects
+        # from before process_queue's own nested app-context session committed, not a fresh
+        # row - same caveat as test_process_queue_does_not_starve_behind_unsatisfiable_tasks
+        # above. Read everything needed into plain values before the block exits.
+        db.session.expire_all()
+        other_status = TaskRequest.query.get(other_id).status
+        allocated_bursty = sum(
+            1 for tid in bursty_ids if TaskRequest.query.get(tid).status == "allocated"
+        )
+
+    assert other_status == "allocated", (
+        "the second student's request was starved behind the first student's burst"
+    )
+    assert allocated_bursty == 1   # exactly one of the burst got the node's one remaining slot
 
 
 def test_job_mode_counts_against_the_fairness_penalty(client, make_user, auth, make_node, db):

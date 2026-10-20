@@ -22,6 +22,7 @@ export default function PoolDashboard({ admin = false }) {
     if (what === "remove" && !window.confirm(`Remove ${d.name} from the pool? Its device key stops working at once.`)) return;
     try {
       if (what === "remove") await api(`/pool/devices/${d.id}`, { method: "DELETE" });
+      else if (what === "clear_quarantine") await api(`/pool/devices/${d.id}`, { method: "PATCH", body: JSON.stringify({ clear_quarantine: true }) });
       else await api(`/pool/devices/${d.id}`, { method: "PATCH", body: JSON.stringify({ paused: what === "pause" }) });
       load();
     } catch (e) { setErr(e.message); }
@@ -113,10 +114,17 @@ function Row({ d, admin, act }) {
         <div className="small muted">{d.owner ? `by ${d.owner}` : d.kind === "browser" ? "browser device" : "lab PC"}</div>
         <div style={{ marginTop: 6 }}><State state={d.state} /></div>
         {d.state === "offline" && <div className="small muted">last seen {ago(d.last_seen)}</div>}
+        {d.quarantined && (
+          <div className="small" style={{ color: "#b45309", marginTop: 4 }}>
+            🚫 Quarantined - excluded from scheduling
+            {d.quarantined_until && <div className="small muted">until {new Date(d.quarantined_until).toLocaleString()} ({d.consecutive_failures} repeated failures)</div>}
+          </div>
+        )}
         {admin && (d.verified || d.state !== "offline") && (
           <div className="row" style={{ marginTop: 8, gap: 6 }}>
             {d.state === "online" && <button className="btn ghost sm" onClick={() => act(d, "pause")}>Pause</button>}
             {d.state === "paused" && <button className="btn ghost sm" onClick={() => act(d, "resume")}>Resume</button>}
+            {d.quarantined && <button className="btn ghost sm" onClick={() => act(d, "clear_quarantine")}>Clear quarantine</button>}
             {d.verified && <button className="btn danger sm" onClick={() => act(d, "remove")}>Remove</button>}
           </div>
         )}

@@ -218,6 +218,11 @@ def get_all_nodes():
         is_active = n.status == "online" and heartbeat and heartbeat > timeout_limit
         display_status = "online" if is_active else "offline"
 
+        quarantined_until = n.quarantined_until
+        if quarantined_until and quarantined_until.tzinfo is None:
+            quarantined_until = quarantined_until.replace(tzinfo=timezone.utc)
+        is_quarantined = bool(quarantined_until and quarantined_until > datetime.now(timezone.utc))
+
         # RAM and Task Calculations
         # All metrics reset to zero if the node is considered offline
         if latest and is_active:
@@ -248,7 +253,10 @@ def get_all_nodes():
             "ram_free": ram_free,
             "total_ram": n.total_ram_mb,
             "running_tasks": active_tasks,
-            "last_seen": heartbeat.isoformat() if heartbeat else None
+            "last_seen": heartbeat.isoformat() if heartbeat else None,
+            "consecutive_failures": n.consecutive_failures or 0,
+            "quarantined": is_quarantined,
+            "quarantined_until": quarantined_until.isoformat() if is_quarantined else None
         })
     
     return jsonify(results), 200
@@ -294,6 +302,26 @@ def delete_node(node_id):
     db.session.commit()
 
     return jsonify({"message": f"Node {node.name} removed successfully"}), 200
+
+
+@admin_bp.route("/admin/nodes/<int:node_id>/clear_quarantine", methods=["POST"])
+@jwt_required()
+def clear_quarantine(node_id):
+    """Manual early release from quarantine (app.allocation_engine.register_node_failure).
+    The cooldown already lifts itself once it elapses - this is for an admin who has
+    independently confirmed the PC is fine (e.g. fixed the network issue that was causing it
+    to flap) and doesn't want to wait out the rest of the window."""
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"error": "Admin access required"}), 403
+
+    node = Node.query.get_or_404(node_id)
+    node.consecutive_failures = 0
+    node.last_failure_at = None
+    node.quarantined_until = None
+    db.session.commit()
+
+    return jsonify({"message": f"Node {node.name} released from quarantine"}), 200
 
 def _last_reason(t):
     # Why a request failed or is waiting, so the admin can see it in History

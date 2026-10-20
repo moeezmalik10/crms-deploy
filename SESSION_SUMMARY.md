@@ -295,12 +295,62 @@ jobs passed, 55 seconds total - not just "works locally."
   code written against them, since building a teammate's individually-graded component for them
   would misrepresent whose work is being evaluated.
 
+## 10. Node quarantine, its admin-UI surfacing, and two minor R3 items
+
+Node quarantine (proposal: "PCs that fail repeatedly are temporarily taken out of the pool",
+R1/Areej's item per the updated proposal's team-area table) was built ahead of Areej's own work,
+at explicit request, with her plan (`docs/handoff/R1_resilience_plan.md` item 3) already naming
+it as hers to take ownership of once ready:
+
+- **Schema**: `Node.consecutive_failures`, `Node.last_failure_at`, `Node.quarantined_until` -
+  idempotent migration, same pattern as the ledger columns.
+- **A real design bug found before it ever reached production verification**: the first version
+  reset `consecutive_failures` on every successful heartbeat. Since a node is only ever
+  re-flagged as failed once per distinct outage (`cleanup_system`'s dead-node query requires
+  `status == "online"`, which the first detection already flips to `"offline"`), "repeatedly"
+  necessarily spans separate online/offline cycles - resetting the counter the instant any
+  heartbeat landed erased that history before a second outage could ever add to it, making the
+  threshold mathematically unreachable. Fixed by adding `last_failure_at` and only forgiving the
+  streak after a stability window (5 min default, env-configurable) with no new failure.
+- **`lock_online_nodes()`/`fitting_device_count()`** both exclude a node while its cooldown is
+  active, even if it's heartbeating again.
+- **Admin-UI surfacing**: `GET /admin/nodes` and `GET /pool/devices` report
+  `quarantined`/`quarantined_until`/`consecutive_failures`; a new
+  `POST /admin/nodes/<id>/clear_quarantine` (admin) and `PATCH /pool/devices/<id>` with
+  `clear_quarantine: true` (admin or the device's own owner) release a node early. Surfaced in
+  `Machines.jsx` and `PoolDashboard.jsx` with a quarantine badge and a "Clear quarantine" button.
+- **Verified live**: deployed (`85ec42c`, then the fix in `5c085e8`), confirmed clean in Render's
+  logs (no warnings/tracebacks), and a real temporary test node (`QTEST-MOEEZ`) was driven
+  through 3 real outages against production with no errors at any step.
+
+Two minor R3 gaps closed, both explicitly *not* fixing a real bug (the underlying race/fairness
+were already closed/measured) but matching the proposal's literal wording:
+- **Per-student quota ledger** (`StudentQuota` model, `app/quotas.py::refresh_student_quota`): a
+  persisted, read-only mirror of the live per-student session/job counts, refreshed on every
+  quota check. Deliberately never itself consulted for a limit decision - `session_quota_message`/
+  `job_quota_message` still decide from a fresh `COUNT()` under the student's own locked `User`
+  row, exactly as before; this only gives the proposal's literal "ledger" an artifact to query,
+  the same role `NodeMetricsHistory` plays for node metrics.
+- **Structural fair-queuing** (`app.allocation_engine.fair_queue_order`): `process_queue` now
+  pulls a wider candidate pool and round-robins it by student within each priority tier before
+  truncating to its batch size, instead of plain `(priority, created_at)` FIFO. A burst of several
+  submissions from one student can no longer occupy every slot in a batch ahead of a single
+  request from someone else - proven with a real `process_queue()` integration test (a node sized
+  for exactly 2 concurrent units, one student bursts 5 jobs, a second student's single job lands
+  right after: both get served in the same tick instead of the second student being starved
+  behind the first four of the burst).
+
+Backend suite: **106 tests**, all passing, no regressions.
+
 ## Known gaps / not done in this session
 
 Per the proposal's own component breakdown, these are explicitly **other team members'
-scope** and were intentionally left alone (see §9 for the handoff plans):
+scope** and were intentionally left alone (see §9 for the handoff plans). Asked explicitly whether
+to build these anyway (after re-stating the ghostwriting concern) and held the line: these stay
+undone here regardless of instruction, since the concern is about Areej/Laiba/Maryam's own
+academic standing, not a process question R3 can waive on their behalf:
 - Lease-based fault tolerance / checkpoint-resume for *sessions and PC-level self-healing*
-  beyond the job-level recovery fixed in Phase 2 (R1 — Areej)
+  beyond the job-level recovery fixed in Phase 2, and beyond node quarantine (§10) (R1 — Areej)
 - Explainable SHAP-based intrusion detection on request-level features (R2 — Laiba)
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4 — Maryam)
 - Pool consolidation is listed under R4 in the updated proposal's team-area table, not R3 — it
@@ -312,10 +362,9 @@ Also still open:
   self-hosted campus server (Ubuntu, Docker microservices behind Nginx, PostgreSQL, MinIO,
   Guacamole) — a full infrastructure migration, not attempted here; this is a whole-team,
   deployment-target decision.
-- A persisted *per-student* quota ledger table (granted/held columns) wasn't built — the
-  `User`-row lock added in Phase 2 closes the actual race without it; revisit if the proposal's
-  literal per-student ledger row becomes something that needs to exist, not just behave
-  correctly.
-- The scheduler's queue is priority + FIFO, not an explicit per-student fair-queuing mechanism
-  — the measured 0.9835 Jain's index shows this converges to fairness in practice over a
-  sustained run, but there's no structural guarantee for a very short burst of contention.
+- R1's admin-UI surfacing for quarantine covers *seeing and clearing* it (§10); the rest of R1's
+  item 3 (and all of items 1-2: the Windows-service agent/watchdog, log rotation) is still Areej's
+  own scope, untouched here.
+
+Closed in §10, previously listed here: the per-student quota ledger table and the scheduler's
+lack of a structural (vs. measured) fairness guarantee.

@@ -21,7 +21,7 @@ from app.models import (DeviceEnrollment, Node, NodeMetrics, NodeMetricsHistory,
                         PoolFile, PoolReplica, TaskExecutionLog, TaskRequest, User)
 from app.pool_security import (decrypt_chunk, encrypt_chunk, new_file_key, new_join_code,
                                sha256_hex, unwrap_key, wrap_key)
-from app.quotas import job_quota_message
+from app.quotas import job_quota_message, refresh_student_quota
 
 pool_bp = Blueprint("pool", __name__)
 
@@ -116,6 +116,11 @@ def _device_json(n, show_private):
     if show_private:
         d["lan_ip"] = n.lan_ip
         d["public_ip"] = n.public_ip
+        quarantined_until = _aware(n.quarantined_until)
+        is_quarantined = bool(quarantined_until and quarantined_until > datetime.now(timezone.utc))
+        d["quarantined"] = is_quarantined
+        d["quarantined_until"] = quarantined_until.isoformat() if is_quarantined else None
+        d["consecutive_failures"] = n.consecutive_failures or 0
     return d
 
 
@@ -236,6 +241,13 @@ def update_device(node_id):
         n.paused = bool(d["paused"])
     if "allow_light_sandbox" in d:
         n.allow_light_sandbox = bool(d["allow_light_sandbox"])
+    if d.get("clear_quarantine"):
+        # Early release from app.allocation_engine.register_node_failure's cooldown - the
+        # owner (or an admin) has independently confirmed the device is fine again and
+        # doesn't want to wait out the rest of the window.
+        n.consecutive_failures = 0
+        n.last_failure_at = None
+        n.quarantined_until = None
     db.session.commit()
     return jsonify(_device_json(n, show_private=True))
 
@@ -475,6 +487,7 @@ def submit_job():
         db.session.add(task)
         db.session.flush()
         log_event(task.id, None, "pending", "Job submitted")
+        refresh_student_quota(user.id)   # same transaction job_quota_message's lock is still holding
         db.session.commit()
         if higher_or_equal_priority_pending(task.priority, exclude_id=task.id):
             result = {"status": "pending", "message": "Queued behind a higher-priority request."}
@@ -513,6 +526,7 @@ def submit_job():
         db.session.flush()
         log_event(child.id, None, "pending", f"Part {i + 1} of {parts} submitted")
         children.append(child.id)
+    refresh_student_quota(user.id)   # same transaction job_quota_message's lock is still holding
     db.session.commit()
     if higher_or_equal_priority_pending(PRIORITY_BATCH, exclude_ids=children):
         allocations = [{"status": "pending", "message": "Queued behind a higher-priority request."} for _ in children]

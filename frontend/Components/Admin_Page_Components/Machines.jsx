@@ -66,6 +66,31 @@ export default function Machines() {
     }
   };
 
+  // 🔥 Clear quarantine (admin override - see backend app/admin_routes.py::clear_quarantine)
+  const handleClearQuarantine = async (nodeId) => {
+    try {
+      const res = await fetch(`${API_BASE}/admin/nodes/${nodeId}/clear_quarantine`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token")}`
+        }
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        alert(data.error || "Failed to clear quarantine");
+        return;
+      }
+
+      fetchMachines();
+
+    } catch (err) {
+      console.error("Clear quarantine failed", err);
+      alert("Server error");
+    }
+  };
+
   // 🔥 Delete Node
   const handleDeleteNode = async (nodeId) => {
     const confirmDelete = window.confirm("Delete this node?");
@@ -212,6 +237,18 @@ export default function Machines() {
 
             <p>IP: {m.ip}</p>
 
+            {m.quarantined && (
+              <p className="text-amber-600 font-semibold mt-1">
+                🚫 Quarantined - excluded from scheduling
+                {m.quarantined_until && (
+                  <span className="block text-xs font-normal text-gray-500">
+                    until {new Date(m.quarantined_until).toLocaleString()}
+                    {" "}({m.consecutive_failures} repeated failures)
+                  </span>
+                )}
+              </p>
+            )}
+
             <hr className="my-3" />
 
             <div className="space-y-1">
@@ -249,6 +286,16 @@ export default function Machines() {
                 ? new Date(m.last_seen).toLocaleString()
                 : "N/A"}
             </div>
+
+            {/* 🔥 CLEAR QUARANTINE BUTTON */}
+            {m.quarantined && (
+              <button
+                onClick={() => handleClearQuarantine(m.id)}
+                className="mt-4 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-md text-sm w-full"
+              >
+                Clear Quarantine
+              </button>
+            )}
 
             {/* 🔥 DELETE BUTTON */}
             <button

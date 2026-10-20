@@ -25,6 +25,27 @@ def update_username(target, value, oldvalue, initiator):
         target.username = value.split('@')[0]
 
 # =========================
+# STUDENT QUOTA LEDGER (proposal's literal per-student ledger row)
+# =========================
+class StudentQuota(db.Model):
+    """A persisted, queryable mirror of app.quotas's live counts - refreshed on every quota
+    check (app.quotas.refresh_student_quota), not itself the source of truth for a limit
+    decision. session_quota_message/job_quota_message always decide from a fresh COUNT() of
+    TaskRequest under the student's own locked User row (app.quotas._lock_user), exactly as
+    before this table existed - this just gives the proposal's literal "per-student quota
+    ledger" an artifact to query, the same read-only-snapshot role NodeMetricsHistory plays for
+    node metrics, without creating a second place a quota decision could drift from the real
+    one."""
+    __tablename__ = "student_quota"
+
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), primary_key=True)
+    active_sessions = db.Column(db.Integer, default=0, nullable=False)
+    active_jobs = db.Column(db.Integer, default=0, nullable=False)
+    max_sessions = db.Column(db.Integer, nullable=False)
+    max_jobs = db.Column(db.Integer, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+# =========================
 # NODES (Agent machines)
 # =========================
 class Node(db.Model):
