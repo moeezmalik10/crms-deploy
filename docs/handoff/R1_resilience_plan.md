@@ -35,10 +35,16 @@ only the interrupted unit is repeated; false failure alarms reduced by 90%+.
   "resumes... from its last checkpoint" half of the sentence above, already built.
 - Node-agent registration retry timing was fixed (8 tries over 120s, matching Render's cold-start
   window) — `node-agent/agent.py`.
+- **Node quarantine (item 3 below) is now built and live** — at Moeez's explicit request, ahead
+  of your own work on this component, the same situation as pool consolidation (see
+  [issue #2](https://github.com/moeezmalik10/crms-deploy/issues/2) for the credit discussion,
+  parallel to [issue #1](https://github.com/moeezmalik10/crms-deploy/issues/1) for consolidation).
+  It's yours to review, take ownership of, and extend — not a to-do. Details moved to "Already
+  done" status under item 3 itself, below.
 
-**What this means for scope:** the lease/checkpoint *mechanics* for divisible work are built. Your
-work is the **PC-level** half: making the agent itself resilient (service + watchdog + log
-rotation) and teaching the scheduler to stop trusting a PC that keeps failing.
+**What this means for scope:** the lease/checkpoint mechanics for divisible work, and quarantine,
+are built. Your remaining work is the rest of the **PC-level** half: making the agent itself
+resilient (service + watchdog + log rotation).
 
 ## What's genuinely missing
 
@@ -62,23 +68,33 @@ service with automatic restart").
 handler, a service running for weeks will grow that file forever. Use Python's
 `logging.handlers.RotatingFileHandler` (stdlib, no new dependency) with a sane size/backup-count.
 
-### 3. Node quarantine after repeated failures
-Not built at all. The proposal: "PCs that fail repeatedly are temporarily taken out of the pool."
+### 3. Node quarantine after repeated failures — DONE, read before changing anything
+The proposal: "PCs that fail repeatedly are temporarily taken out of the pool." Built and live in
+production; review this before extending it, the same way Part 1 of the R4 plan asks Maryam to
+read `_consolidate` before deciding what to change.
 
-- Add columns to `Node` (in `backend/app/models.py`, same idempotent-migration pattern as the
-  rest of this project — see `backend/app/migrations.py` for the template): something like
-  `consecutive_failures` (int, default 0) and `quarantined_until` (nullable timestamp).
-- In `backend/app/tasks.py::cleanup_system`, where a node is currently just marked `offline` on
-  heartbeat timeout, increment `consecutive_failures`; reset it to 0 on a successful heartbeat
-  (`backend/app/agent_routes.py::agent_heartbeat`). Past some threshold (make it configurable,
-  e.g. an env var), set `quarantined_until = now + some cooldown`.
-- In `backend/app/allocation_engine.py::lock_online_nodes` (or right after it, in `allocate_task`),
-  exclude nodes with `quarantined_until` in the future from scheduling — same filtering style
-  already used for `paused` nodes.
-- Surface quarantine state on the admin Machines/Resource Pool page (`frontend/Components/
-  Admin_Page_Components/Machines.jsx`, `frontend/Components/Pool/PoolDashboard.jsx`) so an admin
-  can see *why* a device isn't getting work, and manually clear it early if they trust the PC is
-  actually fine again.
+- `Node.consecutive_failures`, `Node.last_failure_at`, `Node.quarantined_until` —
+  `backend/app/models.py`, idempotent migration in `backend/app/migrations.py`.
+- `backend/app/allocation_engine.py::register_node_failure` increments the counter (called from
+  `cleanup_system`'s dead-node loop) and sets `quarantined_until` past a configurable threshold
+  (`QUARANTINE_FAILURE_THRESHOLD`, default 3) for a configurable cooldown
+  (`QUARANTINE_COOLDOWN_SECONDS`, default 600s).
+- `clear_node_failure` (called from `agent_heartbeat`/`register_node`) only forgives the streak
+  after a stability window (`QUARANTINE_STABILITY_WINDOW_SECONDS`, default 300s) with no new
+  failure — **read the comment on `clear_node_failure` before changing this**: resetting the
+  counter on every heartbeat (the first version's design) makes the threshold mathematically
+  unreachable, since a node is only ever re-flagged once per distinct outage. This was a real bug,
+  found and fixed before it reached production.
+- `lock_online_nodes()`/`fitting_device_count()` exclude a quarantined node from scheduling, even
+  while it's heartbeating again.
+- Admin-UI surfacing is also done: `GET /admin/nodes` and `GET /pool/devices` report
+  `quarantined`/`quarantined_until`/`consecutive_failures`; `POST /admin/nodes/<id>/
+  clear_quarantine` (admin) and `PATCH /pool/devices/<id>` with `clear_quarantine: true` (admin or
+  the device's owner) release a node early; surfaced in `Machines.jsx` and `PoolDashboard.jsx`
+  with a badge and a "Clear quarantine" button.
+- Tests: `backend/tests/test_node_quarantine.py` (15 tests) — the behavior spec, read it first.
+- Verified live: deployed, confirmed clean in Render's logs, and a real temporary test node was
+  driven through 3 real outages against production with no errors (`SESSION_SUMMARY.md` §10).
 
 ### 4. Tighten the detection-to-recovery latency (shared with R3, worth discussing together)
 The proposal's "resumes... within 60 seconds" currently has worst-case latency closer to 90–105s
@@ -96,17 +112,16 @@ honest options, worth a conversation with R3:
   default into.
 
 ## Suggested order
-1. Service + watchdog (NSSM) — immediately useful even standalone, low risk.
-2. Log rotation — small, independent, do it alongside #1 since you're already in `agent.py`.
-3. Node quarantine — the only piece needing backend schema changes; follow the migration pattern
-   in `backend/app/migrations.py` exactly (idempotent `ADD COLUMN IF NOT EXISTS`, non-fatal on
-   failure) since that's what's already live in production.
-4. Revisit detection latency once 1–3 are in and you can measure real numbers.
+1. Read `backend/tests/test_node_quarantine.py` and the quarantine code it covers (item 3) —
+   you're taking ownership of this, so understand it before anything else.
+2. Service + watchdog (NSSM) — immediately useful even standalone, low risk.
+3. Log rotation — small, independent, do it alongside #2 since you're already in `agent.py`.
+4. Revisit detection latency once the above are in and you can measure real numbers.
 
 ## Testing
-No existing tests cover node quarantine or the service/watchdog layer (can't meaningfully unit-
-test an actual Windows service in CI, but the quarantine *logic* — counter increment/reset,
-scheduling exclusion — is plain Python and should get the same pytest treatment as everything
-else in `backend/tests/`. See `backend/tests/test_r3_resilience.py` for the existing
-style/patterns to match (fixtures, `make_node`, directly calling `cleanup_system()`/
-`allocate_task()` rather than going through HTTP where a test doesn't need to).
+`backend/tests/test_node_quarantine.py` (15 tests) covers node quarantine — counter
+increment/reset, the stability-window streak logic, scheduling exclusion, and the admin-UI
+clear-quarantine endpoints. No existing tests cover the service/watchdog layer (can't
+meaningfully unit-test an actual Windows service in CI). See `backend/tests/test_r3_resilience.py`
+for the existing style/patterns to match (fixtures, `make_node`, directly calling
+`cleanup_system()`/`allocate_task()` rather than going through HTTP where a test doesn't need to).
