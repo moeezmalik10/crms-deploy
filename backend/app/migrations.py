@@ -5,6 +5,8 @@ exist in Supabase. These ALTER statements add the resource-pool columns if they 
 so an existing database keeps working without running SQL by hand. Every statement is
 idempotent (ADD COLUMN IF NOT EXISTS) and only runs on PostgreSQL.
 """
+import time
+
 from sqlalchemy import text
 
 NEW_COLUMNS = {
@@ -61,29 +63,46 @@ NEW_CHECK_CONSTRAINTS = [
 ]
 
 
+def _run_ddl(engine, sql, description, retries=1):
+    """Run one DDL statement in its own short transaction, never let it block boot. Each
+    ALTER TABLE used to share one long transaction with every other statement here - found live
+    when a deploy's ADD COLUMN IF NOT EXISTS (idempotent, usually a no-op) hit a genuine
+    psycopg2.errors.DeadlockDetected against the previous instance's scheduler still holding row
+    locks during the rollover, which crashed the whole boot even though the column already
+    existed. Deadlocks are transient by nature, so one quick retry is worth it before giving up
+    - but giving up must still mean "log and continue," never "fail to start," since every
+    statement here is either idempotent or guarded by its own existence check."""
+    for attempt in range(retries + 1):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            return
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(0.5)
+                continue
+            print(f"WARNING: could not {description} (will retry next boot): {e}")
+
+
 def run_startup_migrations(db):
     engine = db.engine
     if engine.dialect.name != "postgresql":
         return
-    with engine.begin() as conn:
-        for table, cols in NEW_COLUMNS.items():
-            for name, sqltype in cols:
-                conn.execute(text(f'ALTER TABLE public."{table}" ADD COLUMN IF NOT EXISTS {name} {sqltype}'))
-        # The new tables hold private data; the browser (anon key) must never read them.
-        for table in ("device_enrollment", "pool_blob", "pool_file", "pool_chunk", "pool_replica",
-                      "node_metrics_history"):
-            conn.execute(text(f'ALTER TABLE IF EXISTS public."{table}" ENABLE ROW LEVEL SECURITY'))
+    for table, cols in NEW_COLUMNS.items():
+        for name, sqltype in cols:
+            _run_ddl(engine, f'ALTER TABLE public."{table}" ADD COLUMN IF NOT EXISTS {name} {sqltype}',
+                     f"add column {name} to {table}")
+    # The new tables hold private data; the browser (anon key) must never read them.
+    for table in ("device_enrollment", "pool_blob", "pool_file", "pool_chunk", "pool_replica",
+                  "node_metrics_history"):
+        _run_ddl(engine, f'ALTER TABLE IF EXISTS public."{table}" ENABLE ROW LEVEL SECURITY',
+                 f"enable row level security on {table}")
     # Two nodes must never share a device key (NULL is fine - unkeyed/legacy nodes have no key).
     # A separate transaction: if duplicate keys already exist from before this was added, log it
     # instead of blocking the app from starting - app.py's device-key lookups already return
     # the first match either way, so this only makes the existing invariant enforced, not new.
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(
-                'CREATE UNIQUE INDEX IF NOT EXISTS node_device_key_hash_key ON public."node" (device_key_hash)'
-            ))
-    except Exception as e:
-        print(f"WARNING: could not enforce unique device keys (likely duplicates already exist): {e}")
+    _run_ddl(engine, 'CREATE UNIQUE INDEX IF NOT EXISTS node_device_key_hash_key ON public."node" (device_key_hash)',
+             "enforce unique device keys (likely duplicates already exist)")
 
     # Postgres has no "ADD CONSTRAINT IF NOT EXISTS", and re-adding a constraint that already
     # exists raises - so each one gets its own transaction and is skipped (not fatal) if it's
