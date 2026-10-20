@@ -52,19 +52,57 @@ shown with every alert.
 
 ## What's genuinely missing
 
-### 1. Request-level feature extraction
-None of this exists yet. You'll need, at minimum, per the proposal's own list:
-- Failed logins per address per minute — needs a sliding-window counter per IP. `ids/ids/
-  attack_counter.py` already does *something* adjacent (it's used for the "3 strikes" blacklist
-  trigger in `ids/routes/detect.py`) — check whether it can be extended/reused rather than
-  building a second counting mechanism from scratch.
-- Request rate (per IP, per account).
-- Payload length, unusual-character ratio.
-- Known injection patterns — `sql_detector.py`/`xss_detector.py` already have pattern-matching
-  logic; whether their boolean outputs become FEATURES for the ML model (not just independent
-  pre-filters) is a design choice worth making deliberately, not by accident.
-- "New device" — needs some notion of a known-device fingerprint per account (nothing like this
-  exists today; decide what's feasible — e.g. a hash of email+user-agent+IP-subnet seen before).
+### 1. Request-level feature extraction — built, not yet wired into `/detect`
+`ids/ids/features.py` (new) has all six features as pure, tested functions
+(`backend/tests` sibling `ids/tests/test_features.py`, 23 tests), per the proposal's list:
+- **"Failed logins per address per minute"** is approximated as *login attempts* per address per
+  minute (`login_attempts_per_minute`, a sliding-window counter). Documented explicitly in the
+  module docstring why: `auth_routes.py::_ids_block_reason` calls `/detect` *before* the password
+  check, so the real pass/fail outcome isn't known yet at screening time - attempt rate is what's
+  actually observable there, and is the standard proxy for brute-force/credential-stuffing
+  detection in that situation. Feeding back the real outcome would need the backend to report it
+  after the check — a genuine architecture change (new backend→IDS call), not a feature-extraction
+  detail; not done here, flagged for a deliberate decision.
+- Request rate: same sliding-window mechanism, keyed by IP — `attack_counter.py`'s own counter
+  (all-time, Supabase-backed, used only for the existing 3-strikes blacklist trigger) was *not*
+  reused, since a rate feature and an all-time tally are different things; `features.py`'s
+  `_SlidingWindowCounter` is in-memory per-process instead (see below for the tradeoff).
+- Payload length (`payload_length`), unusual-character ratio (`unusual_character_ratio`).
+- Known injection patterns: `sql_detector.py`/`xss_detector.py`'s booleans ARE exposed as features
+  now (`has_sql_pattern`/`has_xss_pattern`), but `routes/detect.py`'s early-return behavior for a
+  rule-based hit is unchanged — so in the live `/detect` flow these two features will typically
+  read 0 whenever the ML model actually runs, since a true hit already returned before reaching
+  it. Useful for training-time context and the SHAP explanation regardless; just don't expect to
+  see them flip to 1 in a live prediction.
+- "New device": `device_fingerprint()` hashes `email + user-agent + /24-or-/64 IP subnet`
+  (subnet, not exact IP, so DHCP reshuffling inside the same lab doesn't look like a new device).
+  `is_new_device()` checks it against a store — the default (`_InMemoryDeviceStore`) is an
+  in-memory per-process set: correct for one Flask process, but **resets on restart and isn't
+  shared across gunicorn workers if this service is ever scaled**. Durable tracking needs a new
+  Supabase table (same pattern as `intrusion_logs`/`blacklisted_ips` in
+  `database/supabase_setup.sql`) — deliberately not added without a decision on it; the function
+  takes a `device_store` param so swapping in a real backing store later doesn't touch the
+  fingerprint logic.
+
+**Wired in**: `routes/detect.py` now calls `extract_features()` on every request (before the
+blacklist/SQL/XSS short-circuits, so the stateful counters see every attempt including blocked
+ones) and returns it as a `"features"` key alongside `"prediction"` in every response branch.
+4 new route-level tests in `ids/tests/test_detect_route.py`. Not yet fed into a prediction or
+persisted anywhere - returned in the response only, since logging real vectors needs the same
+new-table decision as the device-fingerprint store above, not made here.
+
+**A real double-counting bug this wiring exposed**: `/detect` is called from *two* places for
+every login - `frontend/Components/LoginPage/LoginPage.jsx` calls it directly from the browser
+first (a leftover from before server-side screening existed), and only if that passes does the
+frontend call `/auth/login`, which makes `auth_routes.py::_ids_block_reason` call `/detect`
+*again*, server-side. Both calls now increment `login_attempts_per_minute` and consume
+`is_new_device`'s one-time flag, so every real login attempt counts as two and a genuinely new
+device reads "new" on the first call but not the second. The frontend's own direct call is
+already redundant for security (the backend's server-side call can't be bypassed, which is the
+whole reason it was added - see `SESSION_SUMMARY.md` §1) - removing `LoginPage.jsx`'s direct
+`/detect` call would fix the double-counting and drop dead code in one change, but that's a
+frontend behavior change outside pure feature-extraction scope, so it wasn't done without
+flagging it first.
 
 ### 2. Training data and training pipeline
 - CSIC 2010 HTTP dataset (public, a proper download+citation, not an unauthenticated pickle this
@@ -95,18 +133,30 @@ your new model's absence/corruption still degrades gracefully rather than taking
 service down. Confirmed working as of this session; `ids/tests/test_model_loader.py` has the test
 coverage pattern to extend once you swap in a new file.
 
-## Suggested order
-1. Nail down the exact feature list and how each one gets computed from a live request (this is
-   the part everything else depends on — do it on paper/in a notebook before touching production
-   code).
-2. Build the counters/extractors as their own testable functions, independent of the model.
-3. Assemble training data, train, measure F1 on a real held-out set.
-4. Ship the model the safe way (pin hash, check/extend the unpickler allowlist).
-5. Add SHAP, wire it into `/detect`'s response, then the dashboard.
+## Suggested order (status as of 2026-10-21)
+1. ~~Nail down the exact feature list~~ — done (item 1 above): six features, each with its
+   design tradeoff documented in `ids/ids/features.py`'s module docstring.
+2. ~~Build the counters/extractors as testable functions~~ — done, 23 tests in
+   `ids/tests/test_features.py`.
+3. ~~Wire `extract_features()` into `routes/detect.py`~~ — done, 4 route tests in
+   `test_detect_route.py`. **Fix the double-counting bug this exposed first** (item 1's note on
+   `LoginPage.jsx`'s redundant direct `/detect` call) before trusting `login_attempts_per_minute`/
+   `is_new_device` numbers from real traffic.
+4. **Next, not started**: decide whether/where to log computed feature vectors for future
+   training data (same new-Supabase-table decision as the device-fingerprint store).
+5. Assemble training data (CSIC 2010 - a real download, needs sign-off before fetching it; plus
+   self-simulated attacks), train, measure F1 on a real held-out set.
+6. Ship the model the safe way (pin hash, check/extend the unpickler allowlist - the pattern in
+   `model_loader.py` already does this for the current model).
+7. Add SHAP, wire it into `/detect`'s response, then the dashboard.
 
 ## Testing
-`ids/tests/` exists now (created this session, 8 tests for `model_loader.py`'s security gates —
-see that file for the project's pytest conventions for this service). Your feature-extraction
-functions should be unit-testable the same way, independent of the trained model itself (feed
-known inputs, assert the counters/flags come out right) — that's valuable test coverage you can
-write *before* the model even exists.
+`ids/tests/` now has **35 tests**: 8 for `model_loader.py`'s security gates, 23 for
+`features.py` (`test_features.py`), 4 for the wired-in `/detect` route
+(`test_detect_route.py`) — deterministic (no real time.sleep, no real network: the route tests
+rely on no `SUPABASE_URL` being set in this environment, which makes `is_blacklisted`/
+`count_attacks` fail fast on a malformed relative URL rather than actually reaching Supabase,
+and monkeypatch `log_intrusion` itself where a response branch would otherwise call it - that
+function calls a real third-party geolocation API before ever touching Supabase). Covers the
+sliding window's expiry behavior, subnet-based fingerprint stability, and each feature
+function's edge cases (empty/missing input). Full suite passes, no regressions.

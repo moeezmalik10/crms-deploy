@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from ids.detector import predict_attack
+from ids.features import extract_features
 from ids.logger import log_intrusion
 from ids.sql_detector import detect_sql_injection
 from ids.xss_detector import detect_xss
@@ -27,10 +28,20 @@ def detect():
         if forwarded:
             ip_address = forwarded
 
+    # R2: request-level features (see ids/ids/features.py's docstring for the design choices
+    # behind each one). Computed for every call, including ones about to be blocked below - an
+    # attempt is an attempt regardless of outcome, and login_attempts_per_minute/is_new_device
+    # need to see every request to mean anything. Not yet fed into a trained model (the current
+    # one is still the old flow-based classifier, which can't use these) or persisted anywhere;
+    # returned in the response so the values are visible and usable without a DB change.
+    features = extract_features(email, password, ip_address,
+                                user_agent=request.headers.get("User-Agent", ""))
+
     # BLOCK BLACKLISTED IP FIRST
     if is_blacklisted(ip_address):
         return jsonify({
-            "prediction": "Blocked: IP Blacklisted"
+            "prediction": "Blocked: IP Blacklisted",
+            "features": features,
         })
 
     # SQL Injection Detection
@@ -41,7 +52,8 @@ def detect():
             blacklist_ip(ip_address)
 
         return jsonify({
-            "prediction": "SQL Injection Attempt"
+            "prediction": "SQL Injection Attempt",
+            "features": features,
         })
 
     # XSS Detection
@@ -52,7 +64,8 @@ def detect():
             blacklist_ip(ip_address)
 
         return jsonify({
-            "prediction": "XSS Attempt"
+            "prediction": "XSS Attempt",
+            "features": features,
         })
 
     # AI IDS Detection
@@ -65,5 +78,6 @@ def detect():
             blacklist_ip(ip_address)
 
     return jsonify({
-        "prediction": prediction
+        "prediction": prediction,
+        "features": features,
     })

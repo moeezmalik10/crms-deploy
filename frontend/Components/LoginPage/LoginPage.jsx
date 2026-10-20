@@ -1,4 +1,4 @@
-import { API_BASE, IDS_BASE } from "../../src/config";
+import { API_BASE } from "../../src/config";
 import React, { useState } from "react";
 import { useNavigate } from "react-router";
 
@@ -13,41 +13,13 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
 
-    let idsPrediction = "BENIGN";
-
     try {
-      // STEP 1: IDS check
-      try {
-        const idsRes = await fetch(
-          `${IDS_BASE}/detect`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              email: email,
-              "Destination Port": 80,
-              "Flow Duration": 100,
-            }),
-          },
-        );
-
-        const idsData = await idsRes.json();
-        idsPrediction = idsData.prediction;
-
-        console.log("IDS Prediction:", idsPrediction);
-      } catch (idsError) {
-        console.log("IDS unavailable, continuing login...");
-      }
-
-      // Block suspicious login
-      if (idsPrediction !== "BENIGN") {
-        setError(`Suspicious activity detected: ${idsPrediction}`);
-        return;
-      }
-
-      // STEP 2: Normal login
+      // The IDS screening used to happen here too, as a direct browser->IDS call before this
+      // request - removed (see SESSION_SUMMARY.md): auth_routes.py::_ids_block_reason already
+      // screens every login server-side (the reason that was added was precisely so screening
+      // can't be skipped by calling the backend directly), so this second client-side call was
+      // redundant for security and was double-counting R2's new per-IP rate/new-device features
+      // (ids/ids/features.py) - every real login attempt was incrementing them twice.
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: {
