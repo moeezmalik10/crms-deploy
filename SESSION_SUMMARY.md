@@ -420,6 +420,44 @@ those issues explicitly rather than assuming this summary settles them.
 
 Backend suite: unaffected (node-agent is a separate app) — still **111 tests**, all passing.
 
+## 13. R2 started: request-level IDS features built and wired; a model built, tested live, and deliberately NOT shipped
+
+Full writeup in `docs/handoff/R2_explainable_ids_plan.md` (items 1-2c) — summarized here because
+of how significant the central finding is.
+
+- **Done, live, low-risk**: twelve request-level features (`ids/ids/features.py`) replacing the
+  old model's unusable network-flow features (every real input was always 0 in production -
+  `/detect` never receives flow data). Wired into `/detect`, returned in every response. A real
+  double-counting bug found and fixed along the way (the frontend called `/detect` directly as
+  well as the backend, inflating the new rate/new-device signals) - `LoginPage.jsx`'s redundant
+  direct call removed, verified live against production.
+- **A model was trained, fully wired for shipping (hash-pinned, allowlist re-derived, `detector.py`
+  rewritten) - and then deliberately NOT shipped**, because testing it against realistic login
+  traffic (not just its own held-out metric) before committing anything found it flagged **100%
+  of real benign logins as anomalous**. Root cause: CSIC 2010's "Normal" class is e-commerce
+  URLs, structurally nothing like an email/password pair - the model learned CSIC's idea of
+  normal, which has almost nothing in common with what `/detect` actually receives. The held-out
+  F1 (0.8919) was answering the wrong question for deployment. Everything that would have shipped
+  was reverted cleanly before any commit; production `/detect` is unchanged.
+- **A second attempt made real progress but still isn't shippable**: retrained using CSIC's real
+  attack-payload *diversity* (256 genuine SQLi/XSS/CRLF/SSI-include substrings extracted from its
+  25,065 Anomalous rows) inside correctly login-shaped fields, with randomized (not fixed-list)
+  benign passwords. False-positive rate on a large, independently-generated benign-login test
+  (different RNG, different generator than training) dropped from **100% to 24.3%** - genuine
+  improvement, still far too high to ship (would block roughly 1 in 4 real logins). The remaining
+  gap is a subtler version of the same lesson: short benign and short malicious strings can look
+  similar on coarse aggregate statistics (length, character ratios) even when their content is
+  completely different, and any synthetic generator has its own implicit statistical shape a
+  model can partly learn to recognize instead of "ordinary text" as a true broad category.
+- **What's kept vs. not**: the feature functions, their tests, the CSIC-payload-extraction
+  technique, and the training/simulation infrastructure (`ids/training/`) are real, tested,
+  reusable output. No model was shipped, because a good F1 on the wrong distribution is worse
+  than no model, not better - this was caught specifically by testing live behavior before
+  committing, not by trusting a metric.
+
+Backend/IDS test suite: `ids/tests/` now at **50 tests** (up from 35 at the start of R2), all
+passing, none of them exercising the unshipped model (reverted alongside the production code).
+
 ## Known gaps / not done in this session
 
 Per the *original* proposal's component breakdown, R2 (explainable IDS) and R4's remote-access
@@ -427,10 +465,12 @@ gateway were left alone as other team members' scope — see §9 for the handoff
 needs re-reading against §12**: the updated proposal lists Moeez as sole author of all of
 R1-R4, which may mean R2/R4 are now also his own scope rather than someone else's. Not
 re-verified or acted on here; flagging rather than assuming.
-- Explainable SHAP-based intrusion detection on request-level features (R2, `docs/handoff/
-  R2_explainable_ids_plan.md`)
+- R2 (explainable, request-level IDS) - started, see §13: features built and live, a shippable
+  low-false-positive model is not yet achieved (two honest attempts, 100% then 24.3% false
+  positive rate on real-shaped login traffic). SHAP integration not started, blocked on having a
+  trustworthy model to explain.
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
-  R4_sessions_gateway_plan.md`)
+  R4_sessions_gateway_plan.md`) - not started.
 - Pool consolidation credit (issue #1) and node quarantine credit (issue #2) were both opened
   under the old, multi-member team structure — see §12.
 

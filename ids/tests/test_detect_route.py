@@ -11,6 +11,11 @@ URL and degrade to their documented safe defaults - no real network call, no moc
 those. log_intrusion() is monkeypatched out in the SQL/XSS tests specifically because it calls a
 real third-party geolocation API (ids/ids/geo_lookup.py) before ever touching Supabase, which a
 unit test must not do regardless of how gracefully it would eventually fail.
+
+A CSIC-2010-trained model exists (ids/training/output/r2_model.pkl, built by
+ids/training/train_model.py) but is NOT wired into prediction here - it flags essentially all
+real login-shaped traffic as anomalous (see docs/handoff/R2_explainable_ids_plan.md item 2), so
+`/detect`'s actual prediction still comes from the old model below, same as before R2 started.
 """
 import sys
 import types
@@ -37,6 +42,8 @@ def test_benign_login_returns_prediction_and_features():
     assert "features" in body
     assert set(body["features"].keys()) == {
         "payload_length", "unusual_character_ratio", "has_sql_pattern", "has_xss_pattern",
+        "special_character_count", "max_special_char_run", "url_encoded_count",
+        "has_path_traversal", "sql_keyword_count", "digit_ratio",
         "login_attempts_per_minute", "is_new_device",
     }
 

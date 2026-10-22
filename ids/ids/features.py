@@ -80,6 +80,79 @@ def has_xss_pattern(email, password):
     return int(detect_xss(email or "") or detect_xss(password or ""))
 
 
+# More granular, explainable companions to has_sql_pattern/has_xss_pattern/
+# unusual_character_ratio, added once a first training pass (ids/training/train_model.py) on
+# CSIC 2010 showed those four alone plateau around F1 0.84 - a boolean "matched/didn't" throws
+# away information a count or a position doesn't. Each one is still a single, nameable signal a
+# SHAP explanation can show an admin ("sql_keyword_count: 4" means something in a way a hidden
+# embedding dimension never would), not a move toward an opaque feature space.
+_SQL_KEYWORDS = re.compile(
+    r"\b(SELECT|UNION|INSERT|DELETE|UPDATE|DROP|OR|AND|FROM|WHERE|TABLE|EXEC|SLEEP)\b|(--)|(/\*)|(#)",
+    re.IGNORECASE)
+_URL_ENCODED = re.compile(r"%[0-9A-Fa-f]{2}")
+_PATH_TRAVERSAL = re.compile(r"\.\.[/\\]|%2e%2e(%2f|%5c|[/\\])", re.IGNORECASE)
+
+
+def special_character_count(email, password):
+    """Raw count companion to unusual_character_ratio - a short field that's entirely unusual
+    characters and a long one that's 10% unusual characters can have the same ratio but a very
+    different raw count, which the ratio alone throws away."""
+    text = f"{email or ''}{password or ''}"
+    return sum(1 for c in text if not _ORDINARY_CHARS.match(c))
+
+
+def max_special_char_run(email, password):
+    """Longest run of consecutive non-ordinary characters. Catches two different attack shapes
+    the per-character ratio misses because it only looks at the overall proportion: a classic
+    buffer-overflow payload (many of the same character in a row) and an obfuscated/encoded
+    injection sequence (several %XX or symbol characters run together), both concentrated rather
+    than spread evenly through the text."""
+    text = f"{email or ''}{password or ''}"
+    best = run = 0
+    for c in text:
+        if not _ORDINARY_CHARS.match(c):
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return best
+
+
+def url_encoded_count(email, password):
+    """Count of %XX hex-escape sequences - a classic evasion technique (%27 for ', %3C for <,
+    %2e%2e%2f for ../) that a plain character-class check doesn't single out from other
+    punctuation."""
+    text = f"{email or ''}{password or ''}"
+    return len(_URL_ENCODED.findall(text))
+
+
+def has_path_traversal(email, password):
+    """1/0 - "../" or "..\\" (or their %2e%2e-encoded form), the classic static-resource-probing
+    / file-disclosure pattern CSIC 2010 specifically includes as its own attack category,
+    distinct from SQL/XSS syntax."""
+    text = f"{email or ''}{password or ''}"
+    return int(bool(_PATH_TRAVERSAL.search(text)))
+
+
+def sql_keyword_count(email, password):
+    """How many SQL keywords/symbols appear, not just whether any do - has_sql_pattern collapses
+    "one stray OR" and "UNION SELECT ... FROM ... WHERE ..." to the same 1, losing the
+    information that more keywords together is a stronger signal than one in isolation."""
+    text = f"{email or ''}{password or ''}"
+    return len(_SQL_KEYWORDS.findall(text))
+
+
+def digit_ratio(email, password):
+    """Fraction of characters that are digits. Normal email/password text has some digits but
+    rarely dominates; a payload built mostly of digits (numeric parameter tampering, encoded
+    byte sequences written as decimal) stands out here even when unusual_character_ratio doesn't
+    flag it, since digits are themselves "ordinary" characters for that feature."""
+    text = f"{email or ''}{password or ''}"
+    if not text:
+        return 0.0
+    return sum(1 for c in text if c.isdigit()) / len(text)
+
+
 class _SlidingWindowCounter:
     """How many times record() was called for a given key in the last `window_seconds`.
     Thread-safe (Flask/gunicorn can serve requests on multiple threads in one worker); an
@@ -107,12 +180,15 @@ class _SlidingWindowCounter:
 _login_attempts = _SlidingWindowCounter(REQUEST_RATE_WINDOW_SECONDS)
 
 
-def login_attempts_per_minute(ip_address, now=None):
+def login_attempts_per_minute(ip_address, now=None, counter=None):
     """See this module's docstring: a proxy for "failed logins per address per minute" using
     what's actually observable at /detect time (an attempt happened), not the eventual outcome.
     Call this once per real /detect invocation - it records the attempt as a side effect, it
-    isn't a read-only query."""
-    return _login_attempts.record(ip_address or "", now=now)
+    isn't a read-only query. Pass `counter` explicitly (same shape as `device_store` on
+    is_new_device) in tests/simulation instead of relying on the shared module-level counter, so
+    repeated calls in one process don't silently accumulate stale hits from earlier calls."""
+    c = counter if counter is not None else _login_attempts
+    return c.record(ip_address or "", now=now)
 
 
 def _ip_subnet(ip_address):
@@ -168,7 +244,8 @@ def is_new_device(email, user_agent, ip_address, device_store=None):
     return int(not store.seen_before(fp))
 
 
-def extract_features(email, password, ip_address, user_agent=None, now=None, device_store=None):
+def extract_features(email, password, ip_address, user_agent=None, now=None, device_store=None,
+                     rate_counter=None):
     """Every feature in one place, in a stable key order - what /detect's eventual model-input
     assembly and the SHAP explanation should both read from, so they can never compute the set
     two different ways and drift apart."""
@@ -177,6 +254,12 @@ def extract_features(email, password, ip_address, user_agent=None, now=None, dev
         "unusual_character_ratio": unusual_character_ratio(f"{email or ''}{password or ''}"),
         "has_sql_pattern": has_sql_pattern(email, password),
         "has_xss_pattern": has_xss_pattern(email, password),
-        "login_attempts_per_minute": login_attempts_per_minute(ip_address, now=now),
+        "special_character_count": special_character_count(email, password),
+        "max_special_char_run": max_special_char_run(email, password),
+        "url_encoded_count": url_encoded_count(email, password),
+        "has_path_traversal": has_path_traversal(email, password),
+        "sql_keyword_count": sql_keyword_count(email, password),
+        "digit_ratio": digit_ratio(email, password),
+        "login_attempts_per_minute": login_attempts_per_minute(ip_address, now=now, counter=rate_counter),
         "is_new_device": is_new_device(email, user_agent, ip_address, device_store=device_store),
     }

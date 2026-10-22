@@ -9,13 +9,19 @@ from ids.features import (
     _SlidingWindowCounter,
     _ip_subnet,
     device_fingerprint,
+    digit_ratio,
     extract_features,
+    has_path_traversal,
     has_sql_pattern,
     has_xss_pattern,
     is_new_device,
     login_attempts_per_minute,
+    max_special_char_run,
     payload_length,
+    special_character_count,
+    sql_keyword_count,
     unusual_character_ratio,
+    url_encoded_count,
 )
 
 
@@ -157,7 +163,58 @@ def test_extract_features_returns_every_feature_with_the_right_keys():
                            now=9000, device_store=store)
     assert set(out.keys()) == {
         "payload_length", "unusual_character_ratio", "has_sql_pattern", "has_xss_pattern",
+        "special_character_count", "max_special_char_run", "url_encoded_count",
+        "has_path_traversal", "sql_keyword_count", "digit_ratio",
         "login_attempts_per_minute", "is_new_device",
     }
     assert out["payload_length"] == payload_length("s@uog.edu.pk", "pw")
     assert out["is_new_device"] == 1   # first time seeing this fingerprint in a fresh store
+
+
+# ---------------------------------------------------------------- the richer, granular features
+# Added after a first training pass (ids/training/train_model.py) on CSIC 2010 showed the
+# original four features plateau around F1 0.84 - see features.py's own comment above these.
+
+def test_special_character_count_counts_unusual_chars_not_just_their_ratio():
+    assert special_character_count("plain@uog.edu.pk", "normalpass") == 0
+    assert special_character_count("x", "\x00\x01\x02") == 3
+
+
+def test_max_special_char_run_finds_the_longest_consecutive_stretch():
+    assert max_special_char_run("plain@uog.edu.pk", "normal") == 0
+    # three ordinary chars, then a run of 5 unusual ones, then ordinary again
+    assert max_special_char_run("abc\x00\x00\x00\x00\x00def", "") == 5
+
+
+def test_max_special_char_run_is_not_fooled_by_scattered_unusual_chars():
+    # same total unusual-char count as the run above, but spread out - the run is much shorter
+    text = "a\x00b\x00c\x00d\x00e\x00f"
+    assert max_special_char_run(text, "") == 1
+
+
+def test_url_encoded_count_counts_percent_hex_sequences():
+    assert url_encoded_count("normal@uog.edu.pk", "normalpass") == 0
+    assert url_encoded_count("%27%20OR%201=1", "") == 3
+
+
+def test_has_path_traversal_detects_dot_dot_slash():
+    assert has_path_traversal("../../etc/passwd", "") == 1
+    assert has_path_traversal("..\\..\\windows\\system32", "") == 1
+    assert has_path_traversal("normal@uog.edu.pk", "normalpass") == 0
+
+
+def test_has_path_traversal_detects_the_url_encoded_form():
+    assert has_path_traversal("%2e%2e%2f%2e%2e%2f", "") == 1
+
+
+def test_sql_keyword_count_counts_every_keyword_not_just_whether_any_matched():
+    assert sql_keyword_count("plain@uog.edu.pk", "normalpass") == 0
+    assert sql_keyword_count("' UNION SELECT user,pass FROM users WHERE 1=1 --", "") > 1
+
+
+def test_digit_ratio_between_zero_and_one():
+    assert digit_ratio("", "") == 0.0
+    assert digit_ratio("abc", "def") == 0.0
+    assert digit_ratio("123", "456") == 1.0
+    r = digit_ratio("abc123", "")
+    assert 0.0 < r < 1.0

@@ -31,9 +31,13 @@ def detect():
     # R2: request-level features (see ids/ids/features.py's docstring for the design choices
     # behind each one). Computed for every call, including ones about to be blocked below - an
     # attempt is an attempt regardless of outcome, and login_attempts_per_minute/is_new_device
-    # need to see every request to mean anything. Not yet fed into a trained model (the current
-    # one is still the old flow-based classifier, which can't use these) or persisted anywhere;
-    # returned in the response so the values are visible and usable without a DB change.
+    # need to see every request to mean anything. Not yet fed into a trained model - a
+    # CSIC-2010-trained model was built and found to flag essentially all real login traffic as
+    # anomalous (CSIC's traffic is URL-shaped, production's is email/password-shaped; see
+    # docs/handoff/R2_explainable_ids_plan.md item 2) - so prediction still comes from the old
+    # model below, unrelated to these features, until a model that's actually safe on real
+    # login-shaped input exists. Returned in the response so the values are visible and usable
+    # without a DB change.
     features = extract_features(email, password, ip_address,
                                 user_agent=request.headers.get("User-Agent", ""))
 
