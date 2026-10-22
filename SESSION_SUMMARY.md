@@ -420,7 +420,7 @@ those issues explicitly rather than assuming this summary settles them.
 
 Backend suite: unaffected (node-agent is a separate app) — still **111 tests**, all passing.
 
-## 13. R2 started: request-level IDS features built and wired; five model attempts, the fifth shipped (not yet committed)
+## 13. R2 started: request-level IDS features built and wired; five model attempts, the fifth shipped and committed
 
 Full writeup in `docs/handoff/R2_explainable_ids_plan.md` (items 1-2f) — summarized here because
 of how significant the central finding is.
@@ -505,9 +505,9 @@ re-verified or acted on here; flagging rather than assuming.
 - R2 (explainable, request-level IDS) - started, see §13: features built and live; a model has
   now been shipped into production code (3.5% FPR on a 200-sample live sweep spanning real
   passwords and realistically-varied email shapes, after four earlier attempts at 100%, 24.3%,
-  2.7%-but-untested-on-email-shape, and 40-60% respectively) but **not yet committed** - that's a
-  separate, explicit decision. SHAP integration not started, blocked on having a trustworthy
-  model to explain (now arguably unblocked, pending the commit decision).
+  2.7%-but-untested-on-email-shape, and 40-60% respectively). Committed and pushed
+  (`2f2ab0a`). SHAP integration not started, blocked only on time now that a trustworthy model
+  exists to explain.
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
   R4_sessions_gateway_plan.md`) - not started.
 - Pool consolidation credit (issue #1) and node quarantine credit (issue #2) were both opened

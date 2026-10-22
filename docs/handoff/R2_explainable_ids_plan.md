@@ -463,8 +463,7 @@ two new regression tests permanently covering what 2e got wrong
 (`test_realistic_benign_logins_are_not_flagged_by_the_model`,
 `test_varied_realistic_uog_email_shapes_are_mostly_not_flagged` - the latter allows at most 1/7
 flagged, loose enough not to be flaky, tight enough to catch a real regression back toward 2e's
-40-60%). All 53 tests pass. **Not yet committed** - this file records what was built and
-validated; committing it is a separate, explicit decision.
+40-60%). All 53 tests pass. **Committed and pushed** (`2f2ab0a`).
 
 ### 3. SHAP integration
 Not present anywhere in the codebase (`ids/requirements.txt` has no `shap` dependency yet). Once
@@ -507,11 +506,10 @@ coverage pattern to extend once you swap in a new file.
    2e found (the training simulator's email generator was too narrow a shape, same problem as
    2b one dimension over) and validated at 3.5% FPR on a 200-sample sweep spanning both the
    simulator's trained email shapes and deliberately out-of-distribution ones, alongside
-   unregressed novel-attack and brute-force detection. Not yet committed - see item 2f for the
-   full acceptance-test writeup before deciding to commit.
-7. Add SHAP, wire it into `/detect`'s response, then the dashboard - blocked on 6 for the same
-   reason: SHAP explanations from a model that misclassifies real traffic would just be
-   confidently-explained wrong answers.
+   unregressed novel-attack and brute-force detection. Committed and pushed (`2f2ab0a`) - see
+   item 2f for the full acceptance-test writeup.
+7. **Next up**: add SHAP, wire it into `/detect`'s response, then the dashboard - previously
+   blocked on 6, now unblocked since a validated model exists to explain.
 
 ## Testing
 `ids/tests/` now has **53 tests**: 8 for `model_loader.py`'s security gates, 31 for
