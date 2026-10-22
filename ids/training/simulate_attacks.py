@@ -31,16 +31,27 @@ traffic (see docs/handoff/R2_explainable_ids_plan.md item 2b): a CSIC-2010-only 
 *every* realistic benign login as anomalous, because CSIC's Normal class is e-commerce URLs
 (100+ characters, URL-encoded, query-string-heavy) - structurally nothing like a short
 email/password pair, so the model learned "URL-shaped = normal" and anything short read as an
-outlier regardless of content. The fix applied here: CSIC's rows are no longer used as training
+outlier regardless of content. The fix applied: CSIC's rows are no longer used as training
 examples at all (neither class) - instead, CSIC_PAYLOAD_POOL (below) extracts the genuinely
 attack-indicative *substrings* from its 25,065 real Anomalous rows (SQLi, XSS, CRLF/header
 injection, SSI includes, time-based blind SQLi...) and reuses them as realistic attack text
 *inside* login-shaped fields, which keeps CSIC's real attack-pattern diversity while fixing the
-shape mismatch that caused the false positives. Benign passwords are also now randomly
-generated (not a fixed 8-item list) for the same reason this module already varies everything
-else: a model should learn the shape of "ordinary text", not memorize a short enumerable set.
+shape mismatch that caused the false positives.
+
+A third problem, found the same way (testing live behavior, not trusting the held-out metric -
+see item 2c): even with the fix above, a hand-rolled benign-password generator (a handful of
+words and length/shape rules) has its own implicit statistical signature a model can partly
+learn to recognize *as* "normal", instead of generalizing to genuinely varied real passwords -
+measured at a 24.3% false-positive rate on an independently-generated benign-login test. The fix
+applied here: PASSWORD_CORPUS (below) draws benign passwords from a real public
+password-frequency list (100,000 real passwords from a well-known breach-derived corpus, see
+training_data/common_passwords/README.md) instead of a small hand-written generator, weighted
+toward the more common entries to match the real-world skew where a small number of passwords
+account for most actual usage - the same "use real data instead of guessing its shape" fix
+already applied to the attack side via CSIC_PAYLOAD_POOL.
 """
 import hashlib
+import itertools
 import os
 import random
 import re
@@ -56,11 +67,15 @@ from ids.features import REQUEST_RATE_WINDOW_SECONDS, _InMemoryDeviceStore, _Sli
 
 RANDOM_SEED = 42
 SIM_START = 1_700_000_000.0   # an arbitrary fixed epoch - only relative spacing matters
-CSIC_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "training_data", "csic_2010", "csic_database.csv")
+_TRAINING_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "training_data")
+CSIC_CSV_PATH = os.path.join(_TRAINING_DATA_DIR, "csic_2010", "csic_database.csv")
+PASSWORD_CORPUS_PATH = os.path.join(_TRAINING_DATA_DIR, "common_passwords",
+                                    "xato-net-10-million-passwords-100000.txt")
 
 FIRST_NAMES = ["ali", "sara", "hamza", "ayesha", "bilal", "mariam", "usman", "zainab", "faisal",
               "hina", "noman", "areeba", "talha", "laiba", "moeez", "amna", "danish", "sana"]
+LAST_NAMES = ["khan", "ahmed", "malik", "butt", "chaudhry", "raza", "hussain", "iqbal",
+             "sheikh", "qureshi", "abbasi", "farooq", "siddiqui", "akhtar", "mahmood"]
 DOMAIN = "uog.edu.pk"
 UAS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0",
@@ -116,10 +131,34 @@ def _load_csic_payload_pool():
 CSIC_PAYLOAD_POOL = _load_csic_payload_pool()
 
 
+def _load_password_corpus():
+    """100,000 real passwords from a public breach-derived frequency list (see
+    training_data/common_passwords/README.md for provenance), sorted most-to-least common in the
+    source file - that order IS rank, used below to weight sampling toward the common end,
+    matching the real-world Zipfian skew where a small number of passwords account for a large
+    share of actual usage. Returns ([], []) if the file isn't present, same fallback contract as
+    _load_csic_payload_pool() above."""
+    if not os.path.exists(PASSWORD_CORPUS_PATH):
+        return [], []
+    with open(PASSWORD_CORPUS_PATH, encoding="utf-8", errors="ignore") as f:
+        corpus = [line.strip() for line in f if line.strip()]
+    weights = (1.0 / (i + 1) for i in range(len(corpus)))
+    cum_weights = list(itertools.accumulate(weights))
+    return corpus, cum_weights
+
+
+PASSWORD_CORPUS, _PASSWORD_CUM_WEIGHTS = _load_password_corpus()
+
+
 def _random_password(rng):
-    """A genuinely varied benign password, not drawn from a short fixed list - a few common
-    real-world shapes (word+digits+symbol, all-lowercase, a passphrase-ish pair of words), so
-    the model sees "ordinary password" as a broad category instead of memorizing 8 strings."""
+    """Benign password text. Mostly drawn from PASSWORD_CORPUS (real passwords, weighted toward
+    the common end) - the fix for the 24.3% false-positive rate measured against the previous,
+    hand-rolled-only generator (see module docstring). The remaining share, and the fallback if
+    the corpus file isn't present, is a small synthetic generator covering password shapes an
+    old breach corpus underrepresents (modern symbol+digit complexity-policy style passwords)."""
+    if PASSWORD_CORPUS and rng.random() < 0.75:
+        return rng.choices(PASSWORD_CORPUS, cum_weights=_PASSWORD_CUM_WEIGHTS, k=1)[0]
+
     words = ["summer", "campus", "gujrat", "dragon", "falcon", "cricket", "cloud", "river",
              "mountain", "silver", "golden", "winter", "coffee", "music", "pixel", "rocket"]
     shape = rng.randint(0, 3)
@@ -133,7 +172,37 @@ def _random_password(rng):
 
 
 def _student_email(i):
-    return f"{FIRST_NAMES[i % len(FIRST_NAMES)]}{i // len(FIRST_NAMES)}@{DOMAIN}"
+    """A stable (account index -> email) mapping, deterministic and pure in `i` - every event
+    generator below references students by the same small index pool (0-199 or 0-399), and
+    is_new_device/login_attempts_per_minute depend on a stable per-account identity, not a fresh
+    email each call, so this must return the exact same string for the same `i` every time.
+
+    Previously just f"{first_name}{i // 18}@{DOMAIN}" - 18 names x a 1-2-digit index, one fixed
+    domain, ~400 shapes total. Tested live against a trained model (see
+    docs/handoff/R2_explainable_ids_plan.md item 2e) and found to cause a 40-60% false-positive
+    rate on realistically-varied real accounts, because real accounts here are admin-created
+    (backend/app/admin_routes.py's create_user()) with no single fixed local-part convention -
+    dotted names, underscored names, and roll-number-style numerics (matching the FYP proposal
+    document's own "23011556-099" numbering) are all equally plausible, and the model had only
+    ever seen the one narrow shape as "normal". This picks from five such shapes per index
+    instead of one, the same "stop guessing the shape, cover the real range" fix already applied
+    to passwords via PASSWORD_CORPUS and to attack text via CSIC_PAYLOAD_POOL."""
+    r = random.Random(i)
+    first = FIRST_NAMES[i % len(FIRST_NAMES)]
+    last = LAST_NAMES[(i * 7 + 3) % len(LAST_NAMES)]
+    shape = r.randint(0, 4)
+    if shape == 0:
+        local = f"{first}.{last}"
+    elif shape == 1:
+        local = f"{first}_{last}{r.randint(1, 99)}"
+    elif shape == 2:
+        local = f"{first}{r.randint(1, 999)}"
+    elif shape == 3:
+        # Roll-number style: admission year + department/program code + serial.
+        local = f"{r.randint(19, 24)}0{r.randint(10000, 19999)}{r.randint(100, 999)}"
+    else:
+        local = f"{first}.{last}{r.randint(1, 99)}"
+    return f"{local}@{DOMAIN}"
 
 
 def _lab_ip(subnet, host):

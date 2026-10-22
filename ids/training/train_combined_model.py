@@ -14,9 +14,17 @@ evidence (does the full feature set actually help, when it's available?), not a 
 is the production-ready model - a model trained only on simulated traffic has never seen a real
 attack's text, and simulated "normal" traffic is necessarily less varied than real usage.
 
+Experiment B, shipped: `ids/r2_model.pkl` (see docs/handoff/R2_explainable_ids_plan.md item 2d
+for the full validation story - a real public password corpus for benign examples, two
+independent live-traffic re-tests, not just this held-out F1) is Experiment B's model, trained
+here with the exact hyperparameters and data pipeline below - re-run this script to reproduce it
+byte-for-byte (fixed RANDOM_STATE throughout the training/ package).
+
 Run from ids/: venv\\Scripts\\python.exe training\\train_combined_model.py
 """
+import hashlib
 import os
+import pickle
 import sys
 
 import pandas as pd
@@ -31,14 +39,22 @@ from training.train_model import TRAINABLE_FEATURE_NAMES, RANDOM_STATE, TEST_SIZ
 from training.train_model import build_dataset as build_csic_dataset
 
 ALL_TWELVE_FEATURES = TRAINABLE_FEATURE_NAMES + ["login_attempts_per_minute", "is_new_device"]
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+EXPERIMENT_B_MODEL_PATH = os.path.join(OUTPUT_DIR, "r2_model_v3.pkl")
+
+# Same regularized config train_model.py settled on for the CSIC-only model (see that script's
+# own comment): an earlier, unconstrained config (500 trees, max_features=None,
+# min_samples_leaf=1) scored marginally higher F1 but produced a 170MB file and was almost
+# certainly overfitting - this smaller configuration generalizes at least as well in every
+# comparison made across this project's training scripts, at a fraction of the size.
+MODEL_KWARGS = dict(n_estimators=150, max_depth=20, min_samples_leaf=4,
+                    random_state=RANDOM_STATE, n_jobs=-1, class_weight="balanced_subsample")
 
 
 def _evaluate(X, y, feature_names, label):
     X_train, X_test, y_train, y_test = train_test_split(
         X[feature_names], y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y)
-    model = RandomForestClassifier(n_estimators=500, random_state=RANDOM_STATE, n_jobs=-1,
-                                   class_weight="balanced_subsample", min_samples_leaf=1,
-                                   max_features=None)
+    model = RandomForestClassifier(**MODEL_KWARGS)
     model.fit(X_train, y_train)
     pred = model.predict(X_test)
     f1 = f1_score(y_test, pred, pos_label=1)
@@ -65,16 +81,25 @@ def experiment_a_combined():
                      "EXPERIMENT A: CSIC 2010 + self-simulated, 10 shared features")
 
 
-def experiment_b_simulated_only_all_features():
+def experiment_b_simulated_only_all_features(save=False):
     X_sim, y_sim, kind_sim = build_simulated_dataset()
-    return _evaluate(X_sim, y_sim, ALL_TWELVE_FEATURES,
-                     "EXPERIMENT B: self-simulated only, all 12 features "
-                     "(the only honest way to include login_attempts_per_minute/is_new_device)")
+    model, f1 = _evaluate(X_sim, y_sim, ALL_TWELVE_FEATURES,
+                          "EXPERIMENT B: self-simulated only, all 12 features "
+                          "(the only honest way to include login_attempts_per_minute/is_new_device)")
+    if save:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        payload = {"model": model, "features": ALL_TWELVE_FEATURES}
+        with open(EXPERIMENT_B_MODEL_PATH, "wb") as f:
+            pickle.dump(payload, f)
+        sha256 = hashlib.sha256(open(EXPERIMENT_B_MODEL_PATH, "rb").read()).hexdigest()
+        print(f"\nSaved: {EXPERIMENT_B_MODEL_PATH}")
+        print(f"SHA-256: {sha256}")
+    return model, f1
 
 
 if __name__ == "__main__":
     _, f1_a = experiment_a_combined()
-    _, f1_b = experiment_b_simulated_only_all_features()
+    _, f1_b = experiment_b_simulated_only_all_features(save=True)
 
     print(f"\n{'#' * 70}")
     print("SUMMARY (all numbers are real, on genuinely held-out test splits):")

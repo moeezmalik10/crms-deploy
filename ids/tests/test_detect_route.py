@@ -12,21 +12,17 @@ those. log_intrusion() is monkeypatched out in the SQL/XSS tests specifically be
 real third-party geolocation API (ids/ids/geo_lookup.py) before ever touching Supabase, which a
 unit test must not do regardless of how gracefully it would eventually fail.
 
-A CSIC-2010-trained model exists (ids/training/output/r2_model.pkl, built by
-ids/training/train_model.py) but is NOT wired into prediction here - it flags essentially all
-real login-shaped traffic as anomalous (see docs/handoff/R2_explainable_ids_plan.md item 2), so
-`/detect`'s actual prediction still comes from the old model below, same as before R2 started.
+The model now wired into prediction (ids/r2_model.pkl) is the one described in
+docs/handoff/R2_explainable_ids_plan.md item 2f: two earlier models were built and found unsafe
+on real login-shaped traffic before ever reaching a commit (item 2, then item 2d - the latter
+validated at 2.7% FPR against individually-sampled passwords, but turned out to have a 40-60%
+FPR against realistically-varied @uog.edu.pk email local-parts once tested live, because the
+training simulator's benign email generator was itself too narrow a "shape" - see item 2e). This
+model retrains on a fixed, five-shape email generator (dotted names, underscored names, bare
+names+numbers, roll-number-style numerics) alongside the same real password corpus - see item 2f
+for the full validation story before trusting this comment alone.
 """
-import sys
-import types
-
-# Same stub as test_model_loader.py: app.py -> routes.detect -> ids.detector -> ids.model_loader
-# would otherwise attempt a real network download of the model file at import time.
-_fake_gdown = types.ModuleType("gdown")
-_fake_gdown.download = lambda *a, **kw: None
-sys.modules.setdefault("gdown", _fake_gdown)
-
-from app import app as flask_app  # noqa: E402
+from app import app as flask_app
 
 
 def _client():
@@ -68,6 +64,79 @@ def test_xss_response_includes_features(monkeypatch):
     body = r.get_json()
     assert body["prediction"] == "XSS Attempt"
     assert body["features"]["has_xss_pattern"] == 1
+
+
+def test_realistic_benign_logins_are_not_flagged_by_the_model():
+    """The regression test for the exact failure that sank the first shipping attempt: a
+    CSIC-trained model flagged ~100% of ordinary logins as anomalous. Each login here is given
+    its own source IP via environ_overrides - routes.detect's login_attempts_per_minute is a
+    process-global, per-IP counter (correctly, in production: that's what lets it notice one
+    source hammering the endpoint), so without this, five *different users'* first-ever logins
+    sent through the same test client (which defaults every request to 127.0.0.1) look
+    indistinguishable from a single attacker's credential-stuffing burst - exactly the shared-
+    state artifact this project already hit once before at the model-validation layer."""
+    logins = [
+        ("student1@uog.edu.pk", "Pakistan@123"),
+        ("ali.khan@uog.edu.pk", "Sunshine99!"),
+        ("fatima.noor@uog.edu.pk", "MyP@ssw0rd"),
+        ("usman.tariq@uog.edu.pk", "football2024"),
+        ("zara.ahmed@uog.edu.pk", "Qwerty12345"),
+    ]
+    client = _client()
+    flagged = []
+    for i, (email, password) in enumerate(logins):
+        r = client.post("/detect", json={"email": email, "password": password},
+                        environ_overrides={"REMOTE_ADDR": f"203.0.113.{i + 1}"})
+        body = r.get_json()
+        if body["prediction"] != "BENIGN":
+            flagged.append((email, body["prediction"]))
+    assert not flagged, f"model flagged realistic benign logins as attacks: {flagged}"
+
+
+def test_varied_realistic_uog_email_shapes_are_mostly_not_flagged():
+    """The regression test for item 2e's failure: a model validated fine on password diversity
+    turned out to have a 40-60% false-positive rate once @uog.edu.pk email *local-part* shape was
+    varied realistically (dotted names, underscored names, roll-number-style numerics) - accounts
+    here are admin-created (backend/app/admin_routes.py's create_user()), so no one shape is
+    guaranteed. This exercises all five shapes training.simulate_attacks._student_email() now
+    generates, plus two shapes deliberately NOT in that generator (a three-part dotted name, a
+    plain short username with no numbers) to check this isn't just memorizing its own five molds.
+    A handful of misses among OOD shapes is acceptable (no training data is perfectly
+    generalizing); a high rate across the board is the item 2e failure recurring."""
+    logins = [
+        ("hamza.chaudhry@uog.edu.pk", "Pakistan123!"),
+        ("sana_khan77@uog.edu.pk", "MyP@ssw0rd2024"),
+        ("ayesha458@uog.edu.pk", "football99"),
+        ("23012323192@uog.edu.pk", "Sunshine88"),
+        ("moeez.qureshi26@uog.edu.pk", "Qwerty!2345"),
+        ("ali.bilal.khan@uog.edu.pk", "StudyHard21"),   # OOD: three-part dotted name
+        ("noman@uog.edu.pk", "Gujrat@786"),             # OOD: bare username, no number
+    ]
+    client = _client()
+    flagged = []
+    for i, (email, password) in enumerate(logins):
+        r = client.post("/detect", json={"email": email, "password": password},
+                        environ_overrides={"REMOTE_ADDR": f"198.51.100.{i + 1}"})
+        body = r.get_json()
+        if body["prediction"] != "BENIGN":
+            flagged.append((email, body["prediction"]))
+    assert len(flagged) <= 1, f"model flagged too many realistically-shaped logins: {flagged}"
+
+
+def test_a_novel_sql_injection_shaped_password_is_flagged(monkeypatch):
+    """A payload that trips neither the deterministic SQL/XSS regexes nor looks like a password
+    at all should still reach the model and get flagged - this is what the ML layer is for."""
+    import routes.detect as detect_route
+    monkeypatch.setattr(detect_route, "log_intrusion", lambda *a, **kw: None)
+    monkeypatch.setattr(detect_route, "detect_sql_injection", lambda *a, **kw: False)
+    monkeypatch.setattr(detect_route, "detect_xss", lambda *a, **kw: False)
+
+    r = _client().post("/detect", json={
+        "email": "attacker@evil.com",
+        "password": "1' AND SLEEP(5)-- -- UNION SELECT password FROM users WHERE 1=1#",
+    })
+    body = r.get_json()
+    assert body["prediction"] == "Anomalous Request (ML)"
 
 
 def test_features_are_computed_before_the_blacklist_short_circuit(monkeypatch):

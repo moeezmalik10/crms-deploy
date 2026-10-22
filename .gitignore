@@ -25,4 +25,5 @@ backend/tests/load/results_*.csv
 backend/tests/real_exec/real_exec.db
 backend/tests/real_exec/work/
 ids/training_data/csic_2010/csic_database.csv
+ids/training_data/common_passwords/xato-net-10-million-passwords-100000.txt
 ids/training/output/

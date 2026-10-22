@@ -293,18 +293,178 @@ genuinely harder to separate on length/ratio/count features alone, no matter how
 better-shaped the training data gets.
 
 **Bottom line for whoever picks this up**: progress is real (100% -> 24.3% false-positive rate)
-but not sufficient. Two honest paths forward, neither attempted here: (a) a much larger and more
-realistic benign corpus - ideally drawn from real password-frequency statistics (e.g. a public
-breach-derived common-password list, used only for its statistical shape, not to actually guess
-real students' passwords) rather than a hand-built generator, so the model learns genuine
-real-world password diversity instead of one script's idea of it; or (b) a different feature
-family better suited to short-string classification - character-level n-grams, or a lookup
-against known-common-password lists, rather than coarse aggregate statistics (length, ratios,
-counts) that struggle to distinguish two short strings that happen to look similar in aggregate
-even when their content is completely different. Whichever is tried, **the 300-login
-independent-generator sanity check above is the right kind of test to re-run before trusting any
-future number** - not the held-out F1 alone, which both attempts proved can look good while
-being unsafe.
+but not sufficient. Two honest paths forward: (a) a much larger and more realistic benign corpus
+- ideally drawn from real password-frequency statistics rather than a hand-built generator - or
+(b) a different feature family better suited to short-string classification. Path (a) was tried
+next - see item 2d.
+
+### 2d. Third attempt: a real public password corpus - the biggest improvement yet, genuinely close
+
+Took path (a) from item 2c's own recommendation. `PASSWORD_CORPUS` in
+`training/simulate_attacks.py` now draws benign passwords from
+[`danielmiessler/SecLists`](https://github.com/danielmiessler/SecLists)'s
+`xato-net-10-million-passwords-100000.txt` - 100,000 real passwords from a well-known
+breach-derived corpus, weighted toward the common end (matching the real-world Zipfian skew)
+instead of a hand-rolled generator's narrow, arbitrary shape. Full provenance in
+`training_data/common_passwords/README.md`. 75% of benign passwords now come from this real
+corpus, 25% still from the old synthetic generator (covering modern complexity-policy-style
+passwords the corpus, being older, underrepresents). Retrained (Experiment B, simulated-only, 12
+features): F1 = 0.8972 - again, not trusted on its own.
+
+**Two independent, rigorous re-tests, not one**, specifically because item 2c's F1 number also
+looked fine before testing live traffic:
+- **300 passwords sampled uniformly from the full real corpus** (not the weighted-toward-common
+  distribution training used, so this mostly exercises passwords the model saw rarely or never
+  during training) - **2.7% false-positive rate** (8/300). The 8 misses cluster near a genuine
+  decision boundary (moderate digit ratio, "word+123"-style passwords like `jimbo123`,
+  `pasta123`) - reasonable classifier uncertainty at the margin, not a systematic distributional
+  failure the way the first two attempts were.
+- **150 passwords from item 2c's own synthetic generator** (the exact one that measured 24.3%
+  there) - **35.3% false-positive rate, worse than before.** Expected and explained, not
+  swept aside: training now weights 75% toward the real corpus, proportionally de-emphasizing
+  that one arbitrary generator's specific style, so the model got better at recognizing real
+  passwords and worse at recognizing *that particular synthetic generator's* passwords. This
+  doesn't weaken the real-corpus result - production receives real human passwords, not that
+  generator's output - but it's reported in full rather than only citing the favorable number.
+- **Attack detection did not regress**: 8/8 novel attacks (SQLi, XSS, path traversal, command
+  injection - none of the exact strings seen in training) still correctly flagged. A simulated
+  brute-force burst (6 rapid attempts, same IP) is caught progressively, starting at the 3rd
+  attempt - not instantly trigger-happy on a single retry, not slow to react either.
+
+**Model**: `ids/training/output/r2_model_v3.pkl` (not committed - gitignored, same as every
+other trained artifact in this doc), 3.7MB, 12 features, `RandomForestClassifier(n_estimators=150,
+max_depth=20, min_samples_leaf=4, class_weight="balanced_subsample")`. **Still not shipped** -
+2.7% is a large improvement over every prior attempt but is a judgment call, not an
+automatic green light, on whether it's low enough to wire into something that can return a 403;
+that decision wasn't made unilaterally here. If it ships: re-derive the unpickler allowlist via
+the discovery technique for this specific file (don't assume it matches an earlier model's), and
+re-run both the uniform-real-corpus and novel-attack checks above as the actual acceptance test,
+not the held-out F1.
+
+### 2e. Fourth attempt: shipped, live-tested through the real Flask route, reverted - a second,
+deeper instance of the same root problem
+
+Wired item 2d's model into production (`ids/ids/model_loader.py` rewritten to load the committed
+`ids/r2_model.pkl` by pinned hash instead of downloading the old CICIDS2017 model; `ids/ids/detector.py`
+rewritten to take the already-computed feature dict and map 0/1 to `BENIGN`/`Anomalous Request (ML)`;
+`routes/detect.py` updated to call it). All 52 tests passed, including a new route-level regression
+test asserting realistic benign logins aren't flagged.
+
+That test used five different fabricated "users," each given their own source IP via
+`environ_overrides` (first attempt forgot this and all five came back flagged - an exact repeat of
+the shared-rate-counter artifact from item 2c, this time one layer up, at the Flask-route level
+instead of inside a one-off validation script; fixed the same way, by varying `REMOTE_ADDR` per
+call instead of per `device_store`/`rate_counter` object). With that fixed, all five passed.
+
+**Before counting that as "tested live," a broader independent sweep was run** - not just 5
+hand-picked logins, but random realistic ones, through the actual Flask test client - because a
+small hand-picked sample is exactly the kind of thing that looks fine by accident (see item 2c's
+own F1-vs-live-traffic gap). First pass: 60 random logins across `uog.edu.pk`/`gmail.com`/
+`yahoo.com`/`hotmail.com`/`outlook.com` - 24/60 (40%) false positives. Investigated before
+concluding anything: `backend/app/admin_routes.py` only allows `@uog.edu.pk` accounts
+(`create_user()`, line ~77), so free-domain emails can't occur in this system and that part of the
+sweep was unrealistic by construction.
+
+Re-ran restricted to `@uog.edu.pk` only, but with realistic *local-part* variety instead of the
+training generator's own narrow shape (see below) - dotted names (`hamza.chaudhry`), underscored
+names with a number (`sana_khan77`), and roll-number-style locals matching the FYP proposal
+document's own numbering convention (`23011556099`, cf. `23011556-099` in `FYP_Proposal.docx`).
+Accounts in this system are admin-created (`admin_routes.py`'s `create_user()`), not self-chosen at
+signup, so there's no fixed convention forcing any one shape - a real admin could plausibly use any
+of these. Result: **16/40 (40%) correct, 60% false-positive rate** - worse than item 2d's
+2.7%, and not explained by the gmail/yahoo domains already ruled out above.
+
+Root cause, confirmed directly against the training data
+(`training.simulate_attacks.build_dataset()`): `_student_email(i)` in `simulate_attacks.py`
+generates every benign training email as one of 18 fixed first names plus a one-or-two-digit
+index, all under a single hardcoded `DOMAIN = "uog.edu.pk"` - roughly 400 distinct shapes total.
+item 2d fixed the *password* dimension's narrowness with a real 100,000-entry corpus, but never
+touched the *email* dimension, which is generated by the same narrow, hand-rolled scheme that sank
+the very first CSIC-based attempt (item 2b) - a model trained on one axis of narrow "shape" learns
+that shape as "normal" regardless of how varied the other axis is, and real accounts whose
+local-part falls outside that narrow range (a longer name, a dot, an underscore, an 11-digit roll
+number) get flagged at a high rate purely for being differently-shaped, not for being attacks.
+
+**Reverted before any commit** - `ids/ids/model_loader.py`, `ids/ids/detector.py`,
+`ids/requirements.txt`, `ids/routes/detect.py`, `ids/tests/test_model_loader.py`, and
+`ids/tests/test_detect_route.py` are all back to their exact pre-attempt (HEAD) state, confirmed
+with `git diff` and a clean 50/50 test pass. `ids/r2_model.pkl` (the shipping copy) was deleted;
+`ids/training/output/r2_model_v3.pkl` (gitignored) still exists locally for whoever picks this up
+next. The two route-level regression tests this attempt wrote
+(`test_realistic_benign_logins_are_not_flagged_by_the_model`, with the per-login-IP fix described
+above, and `test_a_novel_sql_injection_shaped_password_is_flagged`) asserted specifically on the
+new model's `"Anomalous Request (ML)"` label, so they were reverted along with the wiring rather
+than left in asserting on a model no longer in use - nothing from this attempt was committed, so
+re-derive them from this item's description (five logins, distinct `REMOTE_ADDR` per call via
+`environ_overrides`; one SQL-injection-shaped password with the deterministic regex checks
+monkeypatched out) once a model actually ships.
+
+**Not shipped. What's needed before trying again**: enrich `_student_email()` (or replace it) in
+`training/simulate_attacks.py` with realistic local-part diversity - varied lengths, dotted names,
+underscored names, roll-number-style numerics - the same way `PASSWORD_CORPUS` fixed the password
+dimension in item 2d, then retrain, then re-run both this item's sweep methodology (distinct IPs
+per login, `@uog.edu.pk`-only, varied local-part shapes) and item 2d's own real-password-corpus
+and novel-attack checks before considering shipping again. Given two different dimensions of the
+same underlying failure mode have now shown up (CSIC's URL-shaped traffic in 2b, this narrow
+email-shape in 2e), it's worth treating "is every input dimension realistically varied, not just
+the one being actively improved" as a standing question for the next attempt, not a one-off fix.
+
+### 2f. Fifth attempt: the email generator fixed, retrained, shipped again - this one holds up
+
+`_student_email()` in `training/simulate_attacks.py` was rewritten per item 2e's closing
+paragraph: instead of one fixed `{first_name}{small_index}@uog.edu.pk` pattern, it now picks
+deterministically (seeded on the account index, so the same student always maps to the same
+email across every event generator that references them - `is_new_device`/
+`login_attempts_per_minute` need a stable identity) from five realistic shapes - dotted names
+(`hamza.chaudhry`), underscored names with a number (`sana_khan77`), bare name plus a 1-3 digit
+number (`ayesha458`), roll-number-style numerics matching the FYP proposal document's own
+convention (`23012323192`, cf. `23011556-099`), and dotted names with a number. Domain stays
+fixed to `uog.edu.pk` - confirmed in item 2e that `backend/app/admin_routes.py` only allows that
+domain, so that part of the old generator was never the problem.
+
+Retrained (Experiment B, simulated-only, 12 features): F1 = 0.8854 (`r2_model_v3.pkl`,
+SHA-256 `ffbdb9ee6515b33b94a7b04ed1aa4ada0253f7b84f5d6024b6512c9f41433697`) - close to item 2d's
+0.8972, not a meaningfully different number either way; as established repeatedly in this
+document, this number is not what decides anything.
+
+**Validated against the exact failure mode that sank item 2e**, at increasing rigor:
+- 300 passwords uniformly sampled from the real corpus, paired with emails from account indices
+  never used in training (2000+, so unseen accounts too) - **4.0% false-positive rate**, loaded
+  directly against the model object (no Flask route yet at this point).
+- Wired into production the same way as every prior attempt (hash-pinned `ids/r2_model.pkl`,
+  allowlist re-derived via the discovery-unpickler technique - same 7 classes as every model
+  this project has shipped so far), then re-tested **through the real Flask route**, because a
+  model-level check isn't the same as the full `/detect` pipeline - item 2c's own lesson.
+- First broad sweep (60 logins, `@uog.edu.pk` only, 5 trained shapes + deliberately
+  out-of-distribution shapes like three-part dotted names and hyphenated names, but with a fixed
+  hand-picked password list left over from item 2e's reproduction) - 28% false-positive rate.
+  **Investigated rather than accepted**: swapping that fixed password list for
+  `simulate_attacks._random_password()` (the actual training-time password distribution) on the
+  identical email set dropped it to 4/60 (6.7%) - the hand-picked passwords from item 2e's
+  investigation were themselves unrepresentative (unusually long, symbol-heavy), not a sign the
+  email fix had failed.
+- **The real acceptance test**: 200 logins, `@uog.edu.pk` only, passwords uniformly sampled from
+  the real corpus (same distribution item 2d validated against, not the weighted-common one
+  training uses), emails split across the 5 trained shapes and genuinely out-of-distribution
+  shapes not in the generator at all - **3.5% false-positive rate (7/200)**, in the same range as
+  item 2d's password-only 2.7%, now with email shape genuinely varied too. The 7 misses are spread
+  across both trained and OOD shapes, not concentrated in either - no sign of a remaining
+  systematic shape gap, just ordinary classifier margin error.
+- Novel attacks and a brute-force burst re-verified through the real route (not just the model
+  object): SQLi/XSS strings mostly caught by the existing deterministic regex before even
+  reaching the model (expected, unchanged from before); a path-traversal string with no
+  deterministic check ahead of it reached the model and was correctly flagged; a 6-attempt
+  same-IP burst was flagged at 5/6 attempts, escalating as expected.
+
+**Shipped**: `ids/model_loader.py`, `ids/ids/detector.py`, `ids/routes/detect.py`,
+`ids/requirements.txt` (gdown removed), `ids/tests/test_model_loader.py`, and
+`ids/tests/test_detect_route.py` all updated the same way as the reverted item 2e attempt, plus
+two new regression tests permanently covering what 2e got wrong
+(`test_realistic_benign_logins_are_not_flagged_by_the_model`,
+`test_varied_realistic_uog_email_shapes_are_mostly_not_flagged` - the latter allows at most 1/7
+flagged, loose enough not to be flaky, tight enough to catch a real regression back toward 2e's
+40-60%). All 53 tests pass. **Not yet committed** - this file records what was built and
+validated; committing it is a separate, explicit decision.
 
 ### 3. SHAP integration
 Not present anywhere in the codebase (`ids/requirements.txt` has no `shap` dependency yet). Once
@@ -325,7 +485,7 @@ your new model's absence/corruption still degrades gracefully rather than taking
 service down. Confirmed working as of this session; `ids/tests/test_model_loader.py` has the test
 coverage pattern to extend once you swap in a new file.
 
-## Suggested order (status as of 2026-10-21)
+## Suggested order (status as of 2026-10-22)
 1. ~~Nail down the exact feature list~~ — done (item 1 above): twelve features now (six
    original + six added mid-training to close the F1 gap, see item 2), each with its design
    tradeoff documented in `ids/ids/features.py`'s module docstring.
@@ -341,20 +501,23 @@ coverage pattern to extend once you swap in a new file.
    anomalous (0% correct on realistic benign logins) - a distribution mismatch between CSIC's
    URL-shaped traffic and `/detect`'s actual email/password input. **Read item 2b before
    trusting any F1 number in item 2**, including after a future retrain.
-6. **Attempted and reverted** - ship the model the safe way: the full pipeline (hash pin,
-   allowlist, `detector.py` rewrite) was built and does work *mechanically* (see item 2b), but
-   was reverted before committing because the specific CSIC-only model it would have shipped is
-   actively unsafe (blocks real logins). The engineering pattern is proven and reusable; what's
-   missing is a model that's actually safe to point it at - see item 2b's closing paragraph for
-   what that needs.
+6. **Shipped** (see item 2f) - the first two attempts (items 2b, 2e) were reverted before
+   committing because the specific model each would have shipped was actively unsafe (100% then
+   40-60% false-positive rate on realistic traffic). The third attempt fixed the root cause item
+   2e found (the training simulator's email generator was too narrow a shape, same problem as
+   2b one dimension over) and validated at 3.5% FPR on a 200-sample sweep spanning both the
+   simulator's trained email shapes and deliberately out-of-distribution ones, alongside
+   unregressed novel-attack and brute-force detection. Not yet committed - see item 2f for the
+   full acceptance-test writeup before deciding to commit.
 7. Add SHAP, wire it into `/detect`'s response, then the dashboard - blocked on 6 for the same
    reason: SHAP explanations from a model that misclassifies real traffic would just be
    confidently-explained wrong answers.
 
 ## Testing
-`ids/tests/` now has **50 tests**: 8 for `model_loader.py`'s security gates, 31 for
-`features.py` (`test_features.py`), 4 for the wired-in `/detect` route
-(`test_detect_route.py`), 7 for the attack simulator (`test_simulate_attacks.py` - reproducibility,
+`ids/tests/` now has **53 tests**: 8 for `model_loader.py`'s security gates, 31 for
+`features.py` (`test_features.py`), 7 for the wired-in `/detect` route
+(`test_detect_route.py` - including the two regression tests added in item 2f for the exact
+failure modes items 2b and 2e found), 7 for the attack simulator (`test_simulate_attacks.py` - reproducibility,
 chronological ordering, and the two anti-"too easy" checks that catch a simulator accidentally
 teaching the model something false or trivial) — deterministic (no real time.sleep, no real
 network: the route tests rely on no `SUPABASE_URL` being set in this environment, which makes

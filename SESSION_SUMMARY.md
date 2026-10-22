@@ -420,9 +420,9 @@ those issues explicitly rather than assuming this summary settles them.
 
 Backend suite: unaffected (node-agent is a separate app) — still **111 tests**, all passing.
 
-## 13. R2 started: request-level IDS features built and wired; a model built, tested live, and deliberately NOT shipped
+## 13. R2 started: request-level IDS features built and wired; five model attempts, the fifth shipped (not yet committed)
 
-Full writeup in `docs/handoff/R2_explainable_ids_plan.md` (items 1-2c) — summarized here because
+Full writeup in `docs/handoff/R2_explainable_ids_plan.md` (items 1-2f) — summarized here because
 of how significant the central finding is.
 
 - **Done, live, low-risk**: twelve request-level features (`ids/ids/features.py`) replacing the
@@ -449,14 +449,51 @@ of how significant the central finding is.
   similar on coarse aggregate statistics (length, character ratios) even when their content is
   completely different, and any synthetic generator has its own implicit statistical shape a
   model can partly learn to recognize instead of "ordinary text" as a true broad category.
+- **A third attempt used a real public password corpus** (SecLists' 100,000-entry breach-derived
+  list, Zipfian-weighted) for benign passwords instead of a hand-rolled generator, and got the
+  closest result yet: **2.7% false-positive rate** on 300 independently-sampled real passwords,
+  8/8 novel attacks still caught, brute-force bursts still caught progressively. Judged "close but
+  not an automatic ship" and left for a deliberate decision rather than shipped unilaterally.
+- **A fourth attempt shipped that model into production**, wired end-to-end (`model_loader.py`,
+  `detector.py`, `routes/detect.py`, tests), and tested it live through the real Flask route before
+  considering it done. First live-test pass looked unsafe (100% flagged) but turned out to be a
+  test-methodology bug (five fabricated users all arriving from the test client's one default IP,
+  misread as a single attacker's burst) - fixed by giving each login its own source IP. With that
+  fixed, a wider, more realistic independent sweep (random `@uog.edu.pk` accounts with varied
+  local-part shapes - dotted names, underscored names, roll-number-style numerics, not the
+  training simulator's own narrow "name+small-number" pattern) found a **40-60% false-positive
+  rate** - a second, deeper instance of the exact same root problem as the first attempt: the
+  model generalizes only as far as its training data's "shape" on *every* input dimension, and
+  item 2d had only ever fixed the password dimension, never the email dimension. Reverted cleanly
+  before any commit, same as the first attempt.
+- **A fifth attempt fixed the actual root cause**: `_student_email()` in
+  `training/simulate_attacks.py` (the function that generated every benign training email) was
+  rewritten from one fixed `name+small-number@uog.edu.pk` pattern to five realistic shapes
+  (dotted names, underscored names, bare name+number, roll-number-style numerics matching the FYP
+  proposal document's own convention, dotted name+number) - deterministic per account index so
+  the same simulated student always gets the same email, since the model's rate/new-device
+  features depend on stable per-account identity. Retrained, re-wired into production the same
+  way as every prior attempt, and tested through the real Flask route at increasing rigor: a
+  first 60-login sweep with an unlucky, unrepresentative hand-picked password list looked like
+  28% FPR, investigated rather than accepted, and traced to the password list itself (not the
+  email fix) by swapping in the actual training-time password generator, which dropped it to
+  6.7%. The real acceptance test - 200 logins, real passwords uniformly sampled from the same
+  corpus item 2d validated against, emails spanning both the simulator's five trained shapes and
+  genuinely out-of-distribution shapes never in the generator - landed at **3.5% false-positive
+  rate**, in the same range as item 2d's password-only 2.7%, now with email shape genuinely
+  varied too. Novel-attack and brute-force detection re-verified unregressed through the real
+  route. **Shipped into `ids/model_loader.py`/`detector.py`/`routes/detect.py` - not yet
+  committed**, pending an explicit decision to commit.
 - **What's kept vs. not**: the feature functions, their tests, the CSIC-payload-extraction
-  technique, and the training/simulation infrastructure (`ids/training/`) are real, tested,
-  reusable output. No model was shipped, because a good F1 on the wrong distribution is worse
-  than no model, not better - this was caught specifically by testing live behavior before
-  committing, not by trusting a metric.
+  technique, the real-password-corpus integration, the fixed email generator, and the
+  training/simulation infrastructure (`ids/training/`) are all real, tested, reusable output
+  either way. The first two model attempts were reverted, because a good F1 (or a good
+  false-positive rate on an incompletely-varied test) is worse than no model if it's not actually
+  safe - caught both times specifically by testing live behavior before committing, not by
+  trusting a metric. The third attempt passed that same bar.
 
-Backend/IDS test suite: `ids/tests/` now at **50 tests** (up from 35 at the start of R2), all
-passing, none of them exercising the unshipped model (reverted alongside the production code).
+Backend/IDS test suite: `ids/tests/` at **53 tests**, all passing, including two permanent
+regression tests for the exact failure modes the first two model attempts hit.
 
 ## Known gaps / not done in this session
 
@@ -465,10 +502,12 @@ gateway were left alone as other team members' scope — see §9 for the handoff
 needs re-reading against §12**: the updated proposal lists Moeez as sole author of all of
 R1-R4, which may mean R2/R4 are now also his own scope rather than someone else's. Not
 re-verified or acted on here; flagging rather than assuming.
-- R2 (explainable, request-level IDS) - started, see §13: features built and live, a shippable
-  low-false-positive model is not yet achieved (two honest attempts, 100% then 24.3% false
-  positive rate on real-shaped login traffic). SHAP integration not started, blocked on having a
-  trustworthy model to explain.
+- R2 (explainable, request-level IDS) - started, see §13: features built and live; a model has
+  now been shipped into production code (3.5% FPR on a 200-sample live sweep spanning real
+  passwords and realistically-varied email shapes, after four earlier attempts at 100%, 24.3%,
+  2.7%-but-untested-on-email-shape, and 40-60% respectively) but **not yet committed** - that's a
+  separate, explicit decision. SHAP integration not started, blocked on having a trustworthy
+  model to explain (now arguably unblocked, pending the commit decision).
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
   R4_sessions_gateway_plan.md`) - not started.
 - Pool consolidation credit (issue #1) and node quarantine credit (issue #2) were both opened

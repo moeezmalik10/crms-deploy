@@ -1,43 +1,34 @@
-"""model_loader.py downloads a pickle from a public Google Drive link and deserializes it -
+"""model_loader.py loads a pickle committed in the repo (ids/r2_model.pkl) and deserializes it -
 pickle.load() on anything not fully trusted is a textbook RCE vector (a crafted __reduce__ can
 run `os.system`/`subprocess.Popen`/etc. the instant it's deserialized). Two independent gates
-now stand between that download and the running service: the file must match a pinned SHA-256
-hash, and the unpickler itself refuses to construct any class outside a tight allowlist derived
-from what the real model actually needs (sklearn's RandomForestClassifier/DecisionTreeClassifier/
-Tree plus numpy's array-reconstruction helpers) - so even a hash-check bypass or a legitimate-
-looking but tampered file still can't get arbitrary code to run during deserialization.
-
-Module-level import of ids.model_loader is avoided at the top of this file (it would attempt a
-real network download if ids/ids_multiclass_model.pkl isn't already present on disk, which is
-both slow and not what any of these tests are actually about) - gdown.download is stubbed out
-first, same effect as the "model unavailable" branch the service already falls back to today.
+stand between that file and the running service: it must match a pinned SHA-256 hash, and the
+unpickler itself refuses to construct any class outside a tight allowlist derived from what the
+real model actually needs (sklearn's RandomForestClassifier/DecisionTreeClassifier/Tree plus
+numpy's array-reconstruction helpers) - so even a hash-check bypass or a legitimate-looking but
+tampered file still can't get arbitrary code to run during deserialization.
 """
 import hashlib
 import io
 import os
 import pickle
-import sys
-import types
 
 import pytest
 
-# Stub out gdown before model_loader's own module-level load attempt runs, so test collection
-# never touches the network - mirrors the "model unavailable, rule-based only" fallback the
-# service already has for exactly this situation (e.g. a small free server with no cached copy).
-_fake_gdown = types.ModuleType("gdown")
-_fake_gdown.download = lambda *a, **kw: None
-sys.modules.setdefault("gdown", _fake_gdown)
-
-from ids import model_loader  # noqa: E402
+from ids import model_loader
 
 
-def test_module_level_import_falls_back_cleanly_with_no_cached_model():
-    """With no local copy and gdown stubbed to a no-op, the module-level try/except must still
-    leave the service in its documented degraded mode, not raise and crash the whole process."""
-    assert model_loader.model is None or hasattr(model_loader.model, "predict")
-    # The only way `model` is non-None here is if a real ids_multiclass_model.pkl happens to
-    # already sit on disk from a previous run and passes its hash check - either way, importing
-    # the module must never raise.
+def test_module_level_import_loads_the_committed_model():
+    """The real ids/r2_model.pkl is committed in the repo and must load cleanly and pass its
+    own hash check at import time - if this ever fails, the service silently falls back to
+    rule-based-only detection in production, which is worth a loud test failure, not a shrug."""
+    assert model_loader.model is not None
+    assert hasattr(model_loader.model, "predict")
+    assert model_loader.features == [
+        "payload_length", "unusual_character_ratio", "has_sql_pattern", "has_xss_pattern",
+        "special_character_count", "max_special_char_run", "url_encoded_count",
+        "has_path_traversal", "sql_keyword_count", "digit_ratio",
+        "login_attempts_per_minute", "is_new_device",
+    ]
 
 
 def test_sha256_of_matches_hashlib_directly(tmp_path):
