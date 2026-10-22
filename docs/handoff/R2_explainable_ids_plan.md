@@ -465,17 +465,54 @@ two new regression tests permanently covering what 2e got wrong
 flagged, loose enough not to be flaky, tight enough to catch a real regression back toward 2e's
 40-60%). All 53 tests pass. **Committed and pushed** (`2f2ab0a`).
 
-### 3. SHAP integration
-Not present anywhere in the codebase (`ids/requirements.txt` has no `shap` dependency yet). Once
-you have a trained model:
-- Add `shap` to `ids/requirements.txt`.
-- Compute SHAP values per prediction in `ids/ids/detector.py::predict_attack` (or a new module
-  alongside it) and return the top 3 feature contributions, not just the predicted class.
-- Extend `ids/routes/detect.py`'s response shape to include those three reasons.
-- Update the frontend: `frontend/Components/IDS/AdminSecurityDashboard.jsx` currently (check its
-  current state — it may only show raw predictions/blacklist entries today) would need a section
-  rendering "why" per alert, matching the proposal's "every alert shows the three features that
-  most influenced the decision."
+### 3. SHAP integration — done (item 2h)
+See item 2h below for the full writeup. Summary: `ids/ids/explainer.py` computes the top-3 SHAP
+feature contributions for any ML-flagged (`Anomalous Request (ML)`) prediction, `detect.py`
+returns them as `"explanation"` in `/detect`'s response and `log_intrusion` stores them alongside
+the alert, and `AdminSecurityDashboard.jsx` renders a "Why (top features)" column.
+
+### 2h. SHAP integration, verified live
+
+Built per item 3's own outline, nothing deviated from the plan except where reality disagreed
+with the sketch:
+- `ids/ids/explainer.py` - `shap.TreeExplainer(model)`, built lazily (once, on first real use,
+  same fail-safe-not-fail-closed shape as `model_loader.py`'s own model-load try/except - a SHAP
+  failure degrades to no explanation, never breaks `/detect`). `shap==0.54.1` pinned in
+  `ids/requirements.txt` (plus its own `cloudpickle`/`slicer` dependencies) - that version's
+  `shap_values()` returns one array shaped `(n_samples, n_features, n_classes)`, not the list-of-
+  arrays shape older shap versions used; `_class_contributions()` handles both shapes explicitly
+  (tested against synthetic arrays of each shape, not just whichever one happens to be installed).
+- Only ever computed for the ML branch, confirmed deliberately against the proposal's own wording
+  ("every **alert** shows the three features...", not every request) - `ids/ids/detector.py`'s
+  new `explain()` is called from `routes/detect.py` only when `predict_attack()` already returned
+  `ANOMALOUS_LABEL`. A BENIGN prediction, or one caught by the deterministic SQL/XSS/blacklist
+  checks earlier in `detect()`, returns `"explanation": null` - those rule-based matches already
+  name the specific pattern that caught them, which is its own explanation; computing SHAP for
+  every benign request (the overwhelming majority of traffic) would be wasted work nobody reads.
+- `ids/ids/logger.py::log_intrusion()` gained an `explanation=None` parameter, stored in a new
+  `intrusion_logs.explanation` column (`JSONB`, `database/supabase_setup.sql`) - so "every alert
+  shows the three features..." holds for the Security Dashboard's history, not only the one live
+  `/detect` response that happened to trigger it.
+- `frontend/Components/IDS/AdminSecurityDashboard.jsx` - a new "Why (top features)" table column
+  (and PDF export column) rendering each of the three `{feature, contribution, value}` entries,
+  `—` when there's nothing to show. **Verified live**: ran the actual Vite dev server
+  (`.claude/launch.json`, new - reusable for any future frontend verification in this repo),
+  navigated to `/adminpage/securitydashboard`, and stubbed `window.fetch` in the browser console
+  to return realistic mock rows (one ML-flagged alert with a real explanation array, one
+  SQL-Injection alert with `explanation: null`) - confirmed via the rendered page text that the ML
+  row shows all three `feature: contribution (value: ...)` lines and the rule-based row shows `—`,
+  with no console errors. Not tested against a real Supabase instance with the new column
+  (none available here) - the column itself (`ADD COLUMN IF NOT EXISTS`) still needs
+  `database/supabase_setup.sql` re-run against the real project before this is visible there.
+- 7 new tests in `ids/tests/test_explainer.py` (both shap output shapes, sorting, graceful
+  degradation on failure, degradation when unavailable) plus updated assertions in
+  `test_detect_route.py` (every branch's `"explanation"` key checked - `None` for
+  blacklist/SQL/XSS/BENIGN, a real 1-3-entry list for the one ML-flagged case). Full `ids/`
+  suite: 61 tests, all passing.
+- Sanity-checked end to end, not just via the test suite: a live `/detect` call against a
+  brute-force burst (6 same-IP attempts) showed `login_attempts_per_minute`'s contribution
+  actually growing with each attempt (0.25 → 0.49 → 0.49 → 0.49) and dominating the explanation
+  once the burst was underway - a legible, plausible "why," not just three arbitrary numbers.
 
 ### 4. Keep the existing safety behavior
 `model_loader.py`'s fallback ("model unavailable → rule-based detection only, service still
@@ -508,14 +545,16 @@ coverage pattern to extend once you swap in a new file.
    simulator's trained email shapes and deliberately out-of-distribution ones, alongside
    unregressed novel-attack and brute-force detection. Committed and pushed (`2f2ab0a`) - see
    item 2f for the full acceptance-test writeup.
-7. **Next up**: add SHAP, wire it into `/detect`'s response, then the dashboard - previously
-   blocked on 6, now unblocked since a validated model exists to explain.
+7. **Done** (see item 2h) - SHAP wired into `/detect`'s response, stored with each logged alert,
+   and rendered in the Security Dashboard, verified live against the real Vite dev server with
+   stubbed data.
 
 ## Testing
-`ids/tests/` now has **53 tests**: 8 for `model_loader.py`'s security gates, 31 for
+`ids/tests/` now has **61 tests**: 8 for `model_loader.py`'s security gates, 31 for
 `features.py` (`test_features.py`), 7 for the wired-in `/detect` route
 (`test_detect_route.py` - including the two regression tests added in item 2f for the exact
-failure modes items 2b and 2e found), 7 for the attack simulator (`test_simulate_attacks.py` - reproducibility,
+failure modes items 2b and 2e found, and explanation-shape assertions added in item 2h), 8 for
+`ids/ids/explainer.py` (`test_explainer.py` - item 2h), 7 for the attack simulator (`test_simulate_attacks.py` - reproducibility,
 chronological ordering, and the two anti-"too easy" checks that catch a simulator accidentally
 teaching the model something false or trivial) — deterministic (no real time.sleep, no real
 network: the route tests rely on no `SUPABASE_URL` being set in this environment, which makes

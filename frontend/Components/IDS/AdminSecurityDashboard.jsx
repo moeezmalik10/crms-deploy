@@ -101,7 +101,7 @@ const downloadPDF = () => {
 
   // Table
   autoTable(doc, {
-    head: [["Email", "Attack Type", "Time", "IP", "Country", "City"]],
+    head: [["Email", "Attack Type", "Time", "IP", "Country", "City", "Why (top features)"]],
     body: logs.map((log) => [
       log.email,
       log.attack_type,
@@ -110,13 +110,24 @@ const downloadPDF = () => {
       }),
       log.ip_address,
       log.country,
-      log.city
+      log.city,
+      explanationSummary(log.explanation)
     ]),
     startY: 65
   });
 
   doc.save("security_report.pdf");
 };
+// R2's SHAP explanation (Component 9, Objective 6: "every alert shows the three features that
+// most influenced the decision") - null/absent for the rule-based branches (SQL/XSS/blacklist),
+// which already name the specific pattern that matched; only the ML branch's alerts have one.
+const explanationSummary = (explanation) =>
+  Array.isArray(explanation) && explanation.length > 0
+    ? explanation
+        .map((e) => `${e.feature} (${e.contribution >= 0 ? "+" : ""}${e.contribution})`)
+        .join(", ")
+    : "—";
+
 const attackColors = {
   "SQL Injection Attempt": "#ef4444",
   "XSS Attempt": "#f59e0b",
@@ -192,6 +203,7 @@ const attackTypes = [
           <th className="p-3 text-left whitespace-nowrap">IP Address</th>
           <th className="p-3 text-left whitespace-nowrap">Country</th>
           <th className="p-3 text-left whitespace-nowrap">City</th>
+          <th className="p-3 text-left">Why (top features)</th>
         </tr>
       </thead>
 
@@ -210,6 +222,25 @@ const attackTypes = [
             <td className="p-3 whitespace-nowrap">{log.ip_address}</td>
             <td className="p-3 whitespace-nowrap">{log.country}</td>
             <td className="p-3 whitespace-nowrap">{log.city}</td>
+            <td className="p-3 min-w-50">
+              {Array.isArray(log.explanation) && log.explanation.length > 0 ? (
+                <ul className="text-xs text-gray-700 space-y-0.5">
+                  {log.explanation.map((e, i) => (
+                    <li key={i}>
+                      <span className="font-medium">{e.feature}</span>
+                      {": "}
+                      <span className={e.contribution >= 0 ? "text-red-600" : "text-gray-500"}>
+                        {e.contribution >= 0 ? "+" : ""}
+                        {e.contribution}
+                      </span>
+                      <span className="text-gray-400"> (value: {String(e.value)})</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <span className="text-xs text-gray-400">—</span>
+              )}
+            </td>
           </tr>
         ))}
       </tbody>

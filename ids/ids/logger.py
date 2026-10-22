@@ -6,7 +6,14 @@ from datetime import datetime, timezone
 
 from ids.settings import SUPABASE_URL, SUPABASE_KEY, HEADERS
 
-def log_intrusion(email, attack_type, ip_address):
+def log_intrusion(email, attack_type, ip_address, explanation=None):
+    """explanation: the top-3 SHAP feature contributions from ids.detector.explain(), only ever
+    non-None for the ML branch of routes/detect.py - the SQL/XSS/blacklist branches call this
+    with no explanation (their own attack_type label already names the specific rule that
+    matched, which is its own explanation). Stored alongside the log entry (not just returned
+    from /detect) so the Security Dashboard can show "every alert shows the three features that
+    most influenced the decision" (Component 9, Objective 6) for past alerts too, not only the
+    one live response that happened to trigger them."""
     geo = get_geo_location(ip_address)
 
     # Safe email sending
@@ -32,6 +39,7 @@ def log_intrusion(email, attack_type, ip_address):
         "ip_address": ip_address,
         "country": geo["country"],
         "city": geo["city"],
+        "explanation": explanation,
     }
 
     try:

@@ -196,5 +196,10 @@ ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS output_tail TEXT;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 50;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_kind VARCHAR(20);
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS ssh_port INTEGER;
+-- R2's SHAP explanation (ids.explainer): the top-3 feature contributions behind an ML-flagged
+-- alert, as a JSON array - null for the rule-based (SQL/XSS/blacklist) branches, which already
+-- name the specific pattern that matched. jsonb (not text, unlike ml_results.feature_importance
+-- above) so the dashboard reads it back already structured, no client-side JSON.parse needed.
+ALTER TABLE public.intrusion_logs ADD COLUMN IF NOT EXISTS explanation JSONB;
 -- Tables device_enrollment, pool_blob, pool_file, pool_chunk, pool_replica, node_metrics_history
 -- are created by the backend at start-up.

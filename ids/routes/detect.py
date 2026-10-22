@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from ids.detector import predict_attack
+from ids.detector import predict_attack, explain, ANOMALOUS_LABEL
 from ids.features import extract_features
 from ids.logger import log_intrusion
 from ids.sql_detector import detect_sql_injection
@@ -43,6 +43,7 @@ def detect():
         return jsonify({
             "prediction": "Blocked: IP Blacklisted",
             "features": features,
+            "explanation": None,
         })
 
     # SQL Injection Detection
@@ -55,6 +56,7 @@ def detect():
         return jsonify({
             "prediction": "SQL Injection Attempt",
             "features": features,
+            "explanation": None,
         })
 
     # XSS Detection
@@ -67,13 +69,18 @@ def detect():
         return jsonify({
             "prediction": "XSS Attempt",
             "features": features,
+            "explanation": None,
         })
 
     # AI IDS Detection
     prediction = predict_attack(features)
+    # R2's "every alert shows the three features that most influenced the decision"
+    # (Component 9, Objective 6) - only computed for the ML branch; the rule-based branches
+    # above already name the specific pattern that matched, which is its own explanation.
+    explanation = explain(features) if prediction == ANOMALOUS_LABEL else None
 
     if prediction != "BENIGN":
-        log_intrusion(email, prediction, ip_address)
+        log_intrusion(email, prediction, ip_address, explanation=explanation)
 
         if count_attacks(ip_address) >= 3:
             blacklist_ip(ip_address)
@@ -81,4 +88,5 @@ def detect():
     return jsonify({
         "prediction": prediction,
         "features": features,
+        "explanation": explanation,
     })

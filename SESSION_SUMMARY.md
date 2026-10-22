@@ -530,6 +530,36 @@ Full writeup in `docs/handoff/R4_sessions_gateway_plan.md` item 2g.
   connect/disconnect logging; a frontend "connect via SSH" option; and the campus-server
   migration decision this has never depended on to get this far.
 
+## 15. R2's SHAP integration - done, verified live
+
+Full writeup in `docs/handoff/R2_explainable_ids_plan.md` item 2h.
+
+- `ids/ids/explainer.py` computes the top-3 SHAP feature contributions for any ML-flagged
+  (`Anomalous Request (ML)`) prediction - `shap==0.54.1` (newly added to `ids/requirements.txt`),
+  `shap.TreeExplainer` built lazily so a SHAP failure degrades to "no explanation" rather than
+  breaking `/detect`, the same fail-safe philosophy as `model_loader.py`'s own model-load
+  try/except. Deliberately **not** computed for BENIGN or rule-based (SQL/XSS/blacklist)
+  predictions - the proposal's own wording is "every **alert**", and a rule match already names
+  its own reason.
+- `routes/detect.py` returns `"explanation"` in every `/detect` response (null outside the ML
+  branch); `logger.py::log_intrusion()` now stores it alongside the alert in a new
+  `intrusion_logs.explanation` `JSONB` column, so the Security Dashboard's history shows "why"
+  too, not just one live response.
+- `AdminSecurityDashboard.jsx` gained a "Why (top features)" table column (and matching PDF
+  export column) - **verified live**, not just by reading the diff: started the actual Vite dev
+  server (new `.claude/launch.json`, reusable for future frontend checks in this repo), navigated
+  to `/adminpage/securitydashboard`, stubbed the admin API response in the browser console with a
+  realistic ML-flagged row (real explanation array) and a SQL-injection row (`explanation: null`),
+  and confirmed via the rendered page text that the ML row shows all three
+  `feature: contribution (value: ...)` lines and the rule-based row shows `—`, no console errors.
+- 8 new tests (`ids/tests/test_explainer.py` - both of shap's historical output shapes, sorting,
+  graceful degradation) plus updated `test_detect_route.py` assertions on the `"explanation"` key
+  for every response branch. Full `ids/` suite: **61 tests**, all passing.
+- Sanity-checked beyond the test suite: a live brute-force burst (6 same-IP attempts) showed
+  `login_attempts_per_minute`'s SHAP contribution actually growing with each attempt and
+  dominating the explanation once the burst was underway - a legible, plausible "why," not
+  arbitrary numbers.
+
 ## Known gaps / not done in this session
 
 Per the *original* proposal's component breakdown, R2 (explainable IDS) and R4's remote-access
@@ -537,12 +567,11 @@ gateway were left alone as other team members' scope — see §9 for the handoff
 needs re-reading against §12**: the updated proposal lists Moeez as sole author of all of
 R1-R4, which may mean R2/R4 are now also his own scope rather than someone else's. Not
 re-verified or acted on here; flagging rather than assuming.
-- R2 (explainable, request-level IDS) - started, see §13: features built and live; a model has
-  now been shipped into production code (3.5% FPR on a 200-sample live sweep spanning real
-  passwords and realistically-varied email shapes, after four earlier attempts at 100%, 24.3%,
-  2.7%-but-untested-on-email-shape, and 40-60% respectively). Committed and pushed
-  (`2f2ab0a`). SHAP integration not started, blocked only on time now that a trustworthy model
-  exists to explain.
+- R2 (explainable, request-level IDS) - **done**, see §13-§15: features, a validated model
+  (3.5% FPR on a 200-sample live sweep), and SHAP "why" explanations are all shipped, tested
+  (61/61 passing), and the dashboard change verified live against a running dev server. Nothing
+  left on R2's own scope from the proposal; what's outstanding (the campus-server migration,
+  idle detection) belongs to other components.
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
   R4_sessions_gateway_plan.md`) - started, see §14: VM credential questions verified, a token
   contract built and tested, a local Docker prototype scaffolded but not run (no Docker on this

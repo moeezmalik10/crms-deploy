@@ -42,6 +42,9 @@ def test_benign_login_returns_prediction_and_features():
         "has_path_traversal", "sql_keyword_count", "digit_ratio",
         "login_attempts_per_minute", "is_new_device",
     }
+    # A BENIGN prediction has nothing alert-worthy to explain - see ids/ids/explainer.py's
+    # own docstring for why SHAP is only ever computed for the Anomalous branch.
+    assert body["explanation"] is None
 
 
 def test_sql_injection_response_includes_features(monkeypatch):
@@ -53,6 +56,7 @@ def test_sql_injection_response_includes_features(monkeypatch):
     body = r.get_json()
     assert body["prediction"] == "SQL Injection Attempt"
     assert body["features"]["has_sql_pattern"] == 1
+    assert body["explanation"] is None  # a deterministic rule match, not the ML branch
 
 
 def test_xss_response_includes_features(monkeypatch):
@@ -64,6 +68,7 @@ def test_xss_response_includes_features(monkeypatch):
     body = r.get_json()
     assert body["prediction"] == "XSS Attempt"
     assert body["features"]["has_xss_pattern"] == 1
+    assert body["explanation"] is None  # a deterministic rule match, not the ML branch
 
 
 def test_realistic_benign_logins_are_not_flagged_by_the_model():
@@ -137,6 +142,13 @@ def test_a_novel_sql_injection_shaped_password_is_flagged(monkeypatch):
     })
     body = r.get_json()
     assert body["prediction"] == "Anomalous Request (ML)"
+    # "every alert shows the three features that most influenced the decision" (Component 9,
+    # Objective 6) - the one case where an explanation should actually be present.
+    explanation = body["explanation"]
+    assert 0 < len(explanation) <= 3
+    for entry in explanation:
+        assert set(entry.keys()) == {"feature", "contribution", "value"}
+        assert entry["feature"] in body["features"]
 
 
 def test_features_are_computed_before_the_blacklist_short_circuit(monkeypatch):
@@ -151,3 +163,4 @@ def test_features_are_computed_before_the_blacklist_short_circuit(monkeypatch):
     assert body["prediction"] == "Blocked: IP Blacklisted"
     assert "features" in body
     assert body["features"]["payload_length"] > 0
+    assert body["explanation"] is None
