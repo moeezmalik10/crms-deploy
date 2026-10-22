@@ -1,0 +1,10 @@
+# Copy this file to guacamole.properties (gitignored - never commit the real key) and replace
+# the placeholder below with a real 32-hex-digit (16-byte) key, generated with:
+#
+#   openssl rand -hex 16
+#
+# The SAME value must also be set as GUACAMOLE_JSON_SECRET_KEY wherever
+# backend/app/guacamole_gateway.py runs (an env var on the backend, not in this file) - the two
+# sides sign/encrypt and decrypt/verify with the same shared secret. See
+# docs/handoff/R4_sessions_gateway_plan.md item 2f and this directory's README.md.
+json-secret-key: 00000000000000000000000000000000

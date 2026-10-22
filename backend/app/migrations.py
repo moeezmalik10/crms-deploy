@@ -45,6 +45,7 @@ NEW_COLUMNS = {
         ("job_kind", "VARCHAR(20)"),
         ("allocated_at", "TIMESTAMPTZ"),
         ("result_sha256", "VARCHAR(64)"),
+        ("ssh_port", "INTEGER"),
     ],
 }
 

@@ -252,6 +252,7 @@ def task_ready(task_id):
         task.link = data.get("link")
         task.vm_username = data.get("username")
         task.vm_password = data.get("password")
+        task.ssh_port = data.get("ssh_port")
     
     log_event(task.id, task.assigned_node_id, "running", "Node Agent reported success. Session live.")
     db.session.commit()

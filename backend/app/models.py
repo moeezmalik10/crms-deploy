@@ -211,9 +211,13 @@ class TaskRequest(db.Model):
     # "stuck on this attempt" and bounce a freshly-requeued task straight back to pending.
     allocated_at = db.Column(db.DateTime(timezone=True))
     assigned_pc = db.Column(db.String(100))
-    link = db.Column(db.String(255))    
-    vm_username = db.Column(db.String(100)) 
-    vm_password = db.Column(db.String(100)) 
+    link = db.Column(db.String(255))
+    vm_username = db.Column(db.String(100))
+    vm_password = db.Column(db.String(100))
+    # The workspace container's SSH port (see node-agent/pool_runtime.py's WORKSPACE_DOCKERFILE
+    # and app.guacamole_gateway) - set alongside vm_username/vm_password when a remote session
+    # reports ready, used only to issue a Guacamole JSON-auth token for this one session.
+    ssh_port = db.Column(db.Integer)
     message = db.Column(db.Text) # To store the ML JSON metrics/logs
     
     # Explicit timezone support for expiry calculations

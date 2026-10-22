@@ -4,6 +4,7 @@ from app import db
 from app.models import User, TaskRequest, MLResult
 from app.allocation_engine import allocate_task, default_priority, higher_or_equal_priority_pending, stop_task, log_event
 from app.quotas import refresh_student_quota, session_quota_message
+from app.guacamole_gateway import issue_ssh_connection_token, GuacamoleTokenError
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 
 student_bp = Blueprint("student", __name__)
@@ -90,6 +91,27 @@ def manual_stop(task_id):
         return jsonify({"error": "Unauthorized"}), 403
     result = stop_task(task_id, reason="Manual Stop")
     return jsonify(result)
+
+@student_bp.route("/tasks/<int:task_id>/guacamole-token", methods=["GET"])
+@jwt_required()
+def guacamole_token(task_id):
+    """R4's remote-access gateway (see app.guacamole_gateway and
+    docs/handoff/R4_sessions_gateway_plan.md item 2f): a short-lived Guacamole JSON-auth token
+    for this one session's SSH connection, scoped to the requesting student and the session's
+    own expiry - never issued for someone else's session. Ownership is re-checked inside
+    issue_ssh_connection_token even though _owns_task already gates entry here, since that
+    function is the one thing standing between "student asked for their own session's token"
+    and "token granting access to session N" - it must never trust a task row without also
+    checking whose it is."""
+    task = TaskRequest.query.get_or_404(task_id)
+    current_user = _current_user()
+    if not _owns_task(task, current_user):
+        return jsonify({"error": "Unauthorized"}), 403
+    try:
+        token = issue_ssh_connection_token(task, current_user)
+    except GuacamoleTokenError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"token": token})
 
 @student_bp.route("/tasks/my/<username>", methods=["GET"])
 @jwt_required()

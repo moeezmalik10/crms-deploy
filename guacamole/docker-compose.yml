@@ -1,0 +1,80 @@
+# R4's Guacamole gateway: a LOCAL PROTOTYPE, not a production deployment.
+#
+# What this proves, once it's actually run (it has not been - see README.md, this dev machine
+# has no Docker installed): that a token built by backend/app/guacamole_gateway.py is accepted
+# by a real Guacamole instance and actually opens an SSH connection into a workspace container.
+#
+# What this does NOT prove or solve:
+# - Reaching a lab PC with no inbound ports open. guacd here reaches the workspace container
+#   directly over the Docker network this compose file creates - that only works because guacd
+#   and the workspace container are assumed to be on the SAME machine (a dev box, or later the
+#   campus server itself). A real lab PC on a different machine, with no inbound ports, needs an
+#   outbound tunnel from the lab PC to wherever this stack runs - the same problem the existing
+#   Cloudflare Quick Tunnel already solves for code-server's HTTP traffic, not yet solved for
+#   this SSH path. See docs/handoff/R4_sessions_gateway_plan.md item 2f.
+# - Any of this running in production. Nothing here touches Render/Vercel/Supabase, and nothing
+#   should until that's an explicit decision - see the plan doc's "real dependency" section.
+#
+# Before running: see README.md for the one-time setup steps (generating a secret key, fetching
+# the guacamole-auth-json extension jar, initializing the Postgres schema) - this file alone is
+# not enough to start successfully.
+
+services:
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: crms-guacd-prototype
+    restart: unless-stopped
+    networks:
+      - guac
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: crms-guac-postgres-prototype
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: guacamole_db
+      POSTGRES_USER: guacamole_user
+      # Prototype-only default - change this before using the stack for anything but a quick
+      # local test, and never commit a real value here.
+      POSTGRES_PASSWORD: change_me_before_real_use
+    volumes:
+      - guac-db:/var/lib/postgresql/data
+      # docker-entrypoint-initdb.d convention: Postgres runs every .sql file in this directory
+      # once, the first time the data volume is empty. The files come from the guacamole image
+      # itself (see README.md step 2) via the guacamole-auth-jdbc-init named volume below.
+      - guac-jdbc-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - guac
+
+  guacamole:
+    image: guacamole/guacamole:1.5.5
+    container_name: crms-guacamole-prototype
+    restart: unless-stopped
+    depends_on:
+      - guacd
+      - postgres
+    environment:
+      GUACD_HOSTNAME: guacd
+      POSTGRESQL_ENABLED: "true"
+      POSTGRESQL_HOSTNAME: postgres
+      POSTGRESQL_DATABASE: guacamole_db
+      POSTGRESQL_USERNAME: guacamole_user
+      POSTGRESQL_PASSWORD: change_me_before_real_use
+    volumes:
+      - guac-jdbc-init:/opt/guacamole/extensions/guacamole-auth-jdbc/postgresql/schema
+      # GUACAMOLE_HOME: holds guacamole.properties (json-secret-key + anything else) and the
+      # guacamole-auth-json jar under extensions/ - see README.md step 3. Mounted read-only:
+      # this prototype's config is meant to be edited on the host, not from inside the container.
+      - ./guacamole-home:/etc/guacamole:ro
+    ports:
+      # Only bound to localhost - this is a dev-box prototype, not something to expose.
+      - "127.0.0.1:8080:8080"
+    networks:
+      - guac
+
+networks:
+  guac:
+
+volumes:
+  guac-db:
+  guac-jdbc-init:

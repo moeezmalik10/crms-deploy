@@ -195,5 +195,6 @@ ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS exit_code INTEGER;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS output_tail TEXT;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 50;
 ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS job_kind VARCHAR(20);
+ALTER TABLE public."task_request" ADD COLUMN IF NOT EXISTS ssh_port INTEGER;
 -- Tables device_enrollment, pool_blob, pool_file, pool_chunk, pool_replica, node_metrics_history
 -- are created by the backend at start-up.

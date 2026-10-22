@@ -495,6 +495,41 @@ of how significant the central finding is.
 Backend/IDS test suite: `ids/tests/` at **53 tests**, all passing, including two permanent
 regression tests for the exact failure modes the first two model attempts hit.
 
+## 14. R4 started: VM credential questions verified, a Guacamole token-issuance contract built and tested, a local prototype scaffolded but not run
+
+Full writeup in `docs/handoff/R4_sessions_gateway_plan.md` item 2g.
+
+- **Part 2 (VM slots/credentials) verified, not assumed**: the actual production `remote`-mode
+  path (`node-agent/pool_runtime.py::start_workspace`, Docker + Cloudflare Quick Tunnel) already
+  generates a genuinely random password per session and destroys the only thing it's valid for
+  (the whole container) on teardown - the plan's worry about shared/non-expiring credentials
+  turned out to apply only to a legacy, disabled-by-default Hyper-V path
+  (`node-agent/agent.py`'s `VM_CONFIGS`, labeled "older VM sessions" in the frontend), not what
+  students actually use. One real, separate gap found and flagged (not fixed, out of this
+  component's scope): "physical" mode sends the same hardcoded `lab_user`/`lab_123` for every
+  session on every PC, forever - lower priority since physical mode means in-person lab access,
+  not the off-campus remote access Component 11 is actually about.
+- **A design decision made explicitly, not assumed**: Guacamole relays RDP/VNC/SSH, not the
+  HTTP-based code-server workspace sessions actually use today - chose to add SSH to the
+  workspace Docker image (reusing the session's existing one-time password, not a second secret)
+  over the alternatives (a VNC desktop, or resurrecting the disabled/insecure Hyper-V RDP path).
+- **Real, tested code**: `backend/app/guacamole_gateway.py` builds Guacamole's own
+  `guacamole-auth-json` token format (HMAC-SHA256 + AES-128-CBC + base64) - verified byte-for-byte
+  against Apache's own reference shell script via real `openssl` subprocess calls, not just
+  self-consistency. `issue_ssh_connection_token()` grants exactly one SSH connection into the
+  requesting student's own running session, never anyone else's, never expired - exposed via
+  `GET /tasks/<id>/guacamole-token`. 13 new tests, all passing; full backend suite (124 tests)
+  still green.
+- **What's still untested**: this dev machine has no Docker installed. The token bytes are
+  verified; whether the workspace image's sshd actually comes up, and whether a real Guacamole
+  instance actually accepts and relays a token, is not. `guacamole/` has a `docker-compose.yml` +
+  `README.md` prototype stack, written against Guacamole's documentation and explicitly marked
+  as not run here - for whoever has Docker to verify next.
+- **Still open, unchanged**: the outbound-tunnel problem for a lab PC with no inbound ports (this
+  prototype assumes the gateway and the workspace container share a machine); idle detection;
+  connect/disconnect logging; a frontend "connect via SSH" option; and the campus-server
+  migration decision this has never depended on to get this far.
+
 ## Known gaps / not done in this session
 
 Per the *original* proposal's component breakdown, R2 (explainable IDS) and R4's remote-access
@@ -509,7 +544,10 @@ re-verified or acted on here; flagging rather than assuming.
   (`2f2ab0a`). SHAP integration not started, blocked only on time now that a trustworthy model
   exists to explain.
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
-  R4_sessions_gateway_plan.md`) - not started.
+  R4_sessions_gateway_plan.md`) - started, see §14: VM credential questions verified, a token
+  contract built and tested, a local Docker prototype scaffolded but not run (no Docker on this
+  machine). The actual Guacamole relay, the outbound-tunnel problem for a real lab PC, idle
+  detection, and access logging are all still open.
 - Pool consolidation credit (issue #1) and node quarantine credit (issue #2) were both opened
   under the old, multi-member team structure — see §12.
 

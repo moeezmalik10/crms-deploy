@@ -130,3 +130,72 @@ known-gaps list, not something to start solo. Two honest paths:
 and 3 have no test coverage yet; the token issuance/validation logic in particular should be
 straightforwardly testable the same way the rest of this project's JWT-based auth is (see
 `backend/tests/test_r3_quotas.py`'s `auth` fixture for the pattern).
+
+## 2g. R4 started: Part 2 verified, the token contract built, a local prototype scaffolded (not run)
+
+**Part 2, verified by reading rather than assumed:**
+- The code path this plan's "unique per session?"/"expires with session?" questions were really
+  about is `node-agent/pool_runtime.py::start_workspace` (the actual, currently-used `remote`-mode
+  path) - `node-agent/agent.py`'s Hyper-V/`VM_CONFIGS` path with hardcoded `student`/`123` is
+  disabled by default (`USE_HYPERV_VMS`, off unless a node operator manually drops a sentinel
+  file) and is labeled "older VM sessions" in `StudentSessionLink.jsx` - not what students
+  actually use today.
+- On the real path: `_password()` generates a genuinely random 12-character password **per
+  session** (`start_workspace`'s own `pw = _password()`), and the whole container - the only
+  place that password is valid - is destroyed on teardown (`stop_workspace`'s `docker rm -f`).
+  So "unique per session" and "expires with session" were **already true** for the path that
+  matters, just not via a Guacamole/token architecture. The one genuine, still-open gap found:
+  "physical" mode (`mode=="physical"` in `agent.py`) sends a single hardcoded
+  `HOST_USERNAME`/`HOST_PASSWORD` ("lab_user"/"lab_123") for every session on every PC, forever -
+  not fixed here, since physical mode means in-person access at the lab (Component 11 is
+  specifically about *off-campus*/remote access), so it's a lower-priority, separate concern from
+  this plan's actual scope. Flagging it here rather than silently leaving it unmentioned.
+- "A number of VM slots" - the real path already pools correctly: `_workspaces` is keyed by
+  `task_id`, not a fixed VM name, so a PC can host multiple concurrent workspace containers
+  limited only by its sliced capacity, not a fixed VM count.
+
+**Part 3 steps 1-2, built as real token issuance** (not the token-validation architecture
+originally sketched above - see the note below on why that changed):
+- `backend/app/guacamole_gateway.py` builds Guacamole's own `guacamole-auth-json` token format -
+  HMAC-SHA256 sign, AES-128-CBC encrypt (zero IV, PKCS7 padding), base64 - verified byte-for-byte
+  against Apache's own reference script
+  (`extensions/guacamole-auth-json/doc/encrypt-json.sh`) via real `openssl` subprocess calls in
+  `backend/tests/test_r4_guacamole_gateway.py`, not just against another Python implementation of
+  the same potential misunderstanding. This is **not** a `flask_jwt_extended` JWT - Guacamole's
+  JSON-auth extension expects this exact, non-negotiable format, so the earlier "reuse
+  flask_jwt_extended" idea above doesn't apply to this specific external contract (it still
+  applies to this app's own internal tokens, unaffected).
+- `issue_ssh_connection_token(task, requesting_user)` grants exactly one SSH connection into the
+  *requesting student's own, currently running* session - never another student's, never a
+  session that isn't running, never past its own expiry (SQLite's own tzinfo-dropping round-trip
+  handled the same way `app.allocation_engine` already does elsewhere). `GET
+  /tasks/<task_id>/guacamole-token` (`backend/app/student_routes.py`) exposes it, reusing the
+  existing `_owns_task` ownership pattern.
+- New `TaskRequest.ssh_port` column (migration in `app/migrations.py` + `database/
+  supabase_setup.sql`, same idempotent `ADD COLUMN IF NOT EXISTS` pattern as every other column
+  here), populated by `agent_routes.py::task_ready` from the node agent's own ready payload.
+- **Why SSH, not RDP/VNC**: Guacamole relays RDP/VNC/SSH, not arbitrary HTTP apps, and the actual
+  remote path today is code-server (VS Code over HTTP via the existing Cloudflare Quick Tunnel) -
+  that can't be fronted by Guacamole directly. `node-agent/pool_runtime.py::WORKSPACE_DOCKERFILE`
+  now also installs `openssh-server` into the workspace image (reusing the SAME per-session
+  password, not a second secret) via the LinuxServer.io base image's own documented
+  `/custom-cont-init.d` and `/custom-services.d` hooks - this was a deliberate choice among three
+  options (SSH into the workspace container / add a VNC desktop / resurrect the disabled Hyper-V
+  RDP path), not an obvious default.
+
+**What's still genuinely untested**: this dev machine has no Docker installed. The token crypto
+is verified at the byte level (see above); none of the following is: that the workspace image
+actually builds with sshd working, that a real Guacamole instance actually accepts and relays a
+token-gated SSH connection, or that any of this holds up under real use. `guacamole/` has a local
+prototype stack (`docker-compose.yml` + `README.md`) written against Guacamole's own documentation
+- explicitly **not run here** - for whoever has Docker to actually verify before trusting this
+further.
+
+**Still open, unchanged from Part 3's original scope**: the actual outbound-tunnel problem for a
+lab PC with no inbound ports (this prototype assumes `guacd` and the workspace container are on
+the same machine - true for a dev-box prototype, not true for a real lab PC); idle detection;
+connect/disconnect access logging (Guacamole's own connection history needs a real JDBC user
+database, not just JSON auth alone - not yet checked whether that's needed or how it'd combine);
+and any frontend change so students see an "SSH via Guacamole" option. The campus-server
+migration question (whether this ever runs anywhere but a dev box) is still nobody's explicit
+decision - unchanged from this plan's original framing.

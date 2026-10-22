@@ -45,9 +45,40 @@ WS_DIR = os.path.join(HERE, "pool_workspaces")
 
 JOB_IMAGES = {"python": "python:3.12-slim", "cpp": "gcc:14"}
 WORKSPACE_BASE_IMAGE = "lscr.io/linuxserver/code-server:latest"
-WORKSPACE_IMAGE = "crms-workspace:1"
+WORKSPACE_IMAGE = "crms-workspace:2"
+# R4's Guacamole gateway prototype (see docs/handoff/R4_sessions_gateway_plan.md item 2f and
+# app.guacamole_gateway on the backend) needs something Guacamole can actually relay - it speaks
+# RDP/VNC/SSH, not arbitrary HTTP apps, so code-server's own browser UI can't be fronted
+# directly. This adds an SSH server alongside it, reusing the SAME per-session PASSWORD (one
+# secret per session, not two) and the base image's own PUID/PGID-mapped "abc" user.
+#
+# /custom-cont-init.d and /custom-services.d are the LinuxServer.io base image's own documented
+# hooks (https://docs.linuxserver.io/general/container-customization/) for one-shot init and
+# supervised long-running services respectively - not something invented here. Host keys are
+# generated at container START (custom-cont-init.d), not baked into the image at build time:
+# baking them in would mean every workspace container ever built from this image shares the
+# same SSH host key, a well-known footgun with Docker images that bundle sshd.
+#
+# Written against that documentation, not run or built here - this dev machine has no Docker
+# installed. Verify the image actually builds and sshd actually comes up before trusting this
+# in anything real; see guacamole/README.md for how to test it once Docker is available.
 WORKSPACE_DOCKERFILE = f"""FROM {WORKSPACE_BASE_IMAGE}
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3 python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3 python3-pip openssh-server && rm -rf /var/lib/apt/lists/*
+RUN sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \\
+    && sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \\
+    && mkdir -p /custom-cont-init.d /custom-services.d
+RUN printf '%s\\n' \\
+    '#!/usr/bin/with-contenv bash' \\
+    'ssh-keygen -A' \\
+    'echo "abc:${{PASSWORD}}" | chpasswd' \\
+    'mkdir -p /var/run/sshd' \\
+    > /custom-cont-init.d/10-sshd-setup \\
+    && chmod +x /custom-cont-init.d/10-sshd-setup
+RUN printf '%s\\n' \\
+    '#!/usr/bin/with-contenv bash' \\
+    'exec /usr/sbin/sshd -D -e' \\
+    > /custom-services.d/sshd \\
+    && chmod +x /custom-services.d/sshd
 """
 
 BACKEND = ""
@@ -575,13 +606,24 @@ def start_workspace(task_id, minutes, cores, ram_mb, disk_mb):
     os.makedirs(home, exist_ok=True)
     pw = _password()
     port = _free_port()
+    ssh_port = _free_port()
     try:
         image = ensure_workspace_image()
+        # Only the enhanced image has sshd (see WORKSPACE_DOCKERFILE) - if the build failed and
+        # ensure_workspace_image() fell back to the plain base image, there is nothing listening
+        # on 22 to publish, and reporting a port here would let a Guacamole token be issued for
+        # an SSH server that doesn't exist.
+        has_ssh = image == WORKSPACE_IMAGE
         _docker(["rm", "-f", name], timeout=60)
+        port_args = ["-p", f"127.0.0.1:{port}:8443"]            # only reachable through the tunnel
+        if has_ssh:
+            port_args += ["-p", f"127.0.0.1:{ssh_port}:22"]      # only reachable from this same host - see
+                                                                 # app.guacamole_gateway's own docstring for
+                                                                 # why that's a prototype-only assumption
         r = _docker(["run", "-d", "--name", name,
                      f"--cpus={cores:g}", f"--memory={int(ram_mb)}m", f"--memory-swap={int(ram_mb)}m",
                      "--pids-limit", "512", "--security-opt", "no-new-privileges",
-                     "-p", f"127.0.0.1:{port}:8443",          # only reachable through the tunnel
+                     *port_args,
                      "-e", f"PASSWORD={pw}", "-e", "PUID=1000", "-e", "PGID=1000",
                      "-e", "DEFAULT_WORKSPACE=/config/workspace",
                      "-v", f"{home}:/config", image], timeout=600)
@@ -604,7 +646,8 @@ def start_workspace(task_id, minutes, cores, ram_mb, disk_mb):
         _workspaces[task_id] = {"container": name, "tunnel": tunnel, "dir": home, "disk_mb": disk_mb,
                                 "ends": time.time() + minutes * 60}
     _post(f"/agent/tasks/{task_id}/ready", timeout=30, json={
-        "mode": "remote", "link": url, "username": "workspace", "password": pw, "hostname": NODE_NAME})
+        "mode": "remote", "link": url, "username": "workspace", "password": pw, "hostname": NODE_NAME,
+        "ssh_port": ssh_port if has_ssh else None})
     log(f"workspace {task_id}: {url} ({cores:g} core, {ram_mb:g} MB, {disk_mb:g} MB disk, {minutes:g} min)")
 
 
