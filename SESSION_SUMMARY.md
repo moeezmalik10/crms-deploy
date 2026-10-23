@@ -584,6 +584,40 @@ intervals directly against the scheduler's own registered jobs - not just the so
 change can't silently widen the budget back out unnoticed. Full backend suite: **126 tests**, all
 passing. The per-unit-lease option remains open, a genuinely separate design decision.
 
+## 17. R1 item 1: the Windows service + watchdog, actually installed and verified live
+
+Full writeup in `docs/handoff/R1_resilience_plan.md` item 1.
+
+Installed NSSM on Moeez's own PC and ran `install_service.bat` for real - this was always flagged
+as something only he could do (a system-level change), so this session's role was guiding each
+step and diagnosing what the resulting evidence actually meant, not performing the install itself.
+
+- The install script's own error message ("service was installed but failed to start") turned
+  out to be a false negative - a known NSSM 2.24 timing quirk on modern Windows. `Get-Service`
+  showed `Running` moments later; worth knowing for next time so a real failure isn't mistaken
+  for success, or vice versa.
+- **Kill test**: the first attempt showed "no change" - Task Manager without elevation, and a
+  non-elevated `Stop-Process`, both silently fail against a LocalSystem-owned process with no
+  obvious error to the person running it. Switching to an elevated PowerShell and confirming the
+  exact managed PID via `Get-CimInstance Win32_Service` (not guessed) found the real process to
+  kill - NSSM respawned it under a new PID within seconds, confirmed via a fresh log entry, not
+  by watching `Get-Service`'s status (which never leaves `Running` during a respawn - NSSM hides
+  it from the SCM by design, so that was the wrong signal to watch for this test specifically).
+- **Reboot test**: the same "looks done but isn't" pattern once more - the first "rebooted, check
+  it" showed unbroken heartbeats and an unchanged `LastBootUpTime`, meaning no real reboot had
+  happened (most likely Fast Startup resuming from hibernation rather than a true restart, or the
+  reboot not having actually been triggered). A genuine `Restart` (not `Shut down`) produced a
+  fresh boot time and a new `AGENT STARTING` log entry 24 seconds later, with the service already
+  running with no manual start - confirmed with real evidence both times, not taken on say-so.
+- **A real, separate, pre-existing bug found and fixed along the way**: this PC's device key had
+  been revoked, unrelated to the service work itself. Rejoined non-interactively via
+  `join_code.txt` (the agent's interactive join prompt needs a TTY a Windows service never has) -
+  now registered and heartbeating successfully as `MOEEZ-3`. The old `MOEEZ-2` node row is a
+  harmless orphaned database entry now, not cleaned up.
+
+Every item in `docs/handoff/R1_resilience_plan.md` is now done, except the per-unit-lease half of
+item 4, which was always framed as a separate, optional decision rather than a gap.
+
 ## Known gaps / not done in this session
 
 Per the *original* proposal's component breakdown, R2 (explainable IDS) and R4's remote-access
@@ -607,12 +641,12 @@ Also still open:
 - The platform still runs on Render/Vercel/Supabase, not the updated proposal's target
   self-hosted campus server (Ubuntu, Docker microservices behind Nginx, PostgreSQL, MinIO,
   Guacamole) — a full infrastructure migration, not attempted here.
-- R1 item 1 (Windows service/watchdog) needs a real run to verify — see §12.
-- R1 item 4 (detection-to-recovery latency) - tick-interval half done, see §16; the per-unit-lease
-  half still open, a separate design decision.
+- R1 item 4's per-unit-lease option - a separate design decision, not attempted; the
+  tick-interval half already done (§16) covers most of the practical benefit.
 
-Closed in §10/§12/§16, previously listed here: the per-student quota ledger table, the scheduler's
-lack of a structural fairness guarantee, R1's log rotation, and R1's quarantine admin-UI scope.
+Closed in §10/§12/§16/§17, previously listed here: the per-student quota ledger table, the
+scheduler's lack of a structural fairness guarantee, R1's log rotation, R1's quarantine admin-UI
+scope, and R1 item 1 (Windows service/watchdog - installed and verified live on a real PC, §17).
 Also closed: pool consolidation credit (issue #1, resolved Oct 19, 2026 as shared credit between
 R3 and R4) and node quarantine credit (issue #2, resolved Oct 20, 2026 - the updated proposal's
 sole-author structure supersedes the original credit question) — see §12.

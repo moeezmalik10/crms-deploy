@@ -7,6 +7,9 @@ framing below is historical context for how it was written, not the current team
 items 1-3 are now implemented as Moeez's own work (see their entries below for what's verified
 vs. not). Issues #1 and #2 predate this and are now both resolved and closed - see item 3's own
 note below.
+**Note (2026-10-23):** item 1 (service + watchdog) is now done and verified live too - every item
+in this plan is complete except the per-unit-lease half of item 4, which was always a separate,
+optional decision, not a gap.
 **Written by:** an AI assistant working with Muhammad Moeez on his own R3 scope, at his request, as
 a starting point for you — not a substitute for your own work. Everything here is a plan to
 review, adjust, and implement yourself; nothing in this file has been coded for you.
@@ -57,23 +60,46 @@ resilient (service + watchdog + log rotation).
 
 ## What's genuinely missing
 
-### 1. Agent as a Windows service with a watchdog — written, needs a real run to verify
+### 1. Agent as a Windows service with a watchdog — done, verified live (2026-10-23)
 `node-agent/install_service.ps1` (+ `install_service.bat`/`uninstall_service.bat`) registers
 `agent.py` as a Windows service via NSSM, following `setup_sandbox.ps1`'s exact pattern
 (self-elevation, a `Run-Native` helper, transcript logging to `install_service.log`, idempotent
 re-run). Configures NSSM's own restart-on-exit as the watchdog (`AppExit Default Restart`,
 `AppRestartDelay` 5s, `AppThrottle` 10s so a genuine crash-loop backs off instead of spinning),
 auto-start on boot, and NSSM's own rotated stdout/stderr capture as a safety net below the
-agent's own logging. `DEPLOY_GUIDE.md` Step 6 now mentions it as the option for a lab PC that
-should stay in the pool unattended.
+agent's own logging. `DEPLOY_GUIDE.md` Step 6 mentions it as the option for a lab PC that should
+stay in the pool unattended.
 
-**What's actually verified vs. not**: the script's syntax is checked (PowerShell's own AST
-parser) and it mirrors `setup_sandbox.ps1` closely, but it was never executed - installing a
-Windows service is a system-level change, not something done without you directly running it
-and watching what happens. Before trusting it: run `install_service.bat` on a real PC (you'll
-need `nssm.exe` from nssm.cc first - see `node-agent/tools/README.md`), confirm the service
-shows **Running** in `services.msc`, kill the agent process and confirm NSSM restarts it, and
-reboot the PC to confirm it comes back on its own.
+**Actually run and verified, not just written**, on Moeez's own PC (NSSM 2.24 win64,
+`node-agent/tools/nssm.exe`):
+- `install_service.bat` registered `CRMSNodeAgent` (`StartType: Automatic`). NSSM 2.24 itself
+  has a known timing quirk on modern Windows where `nssm start` sometimes reports "Unexpected
+  status SERVICE_START_PENDING in response to START control" even though the service transitions
+  to Running moments later - the install script's own `throw` on that message is a false
+  negative worth knowing about, not a sign the install actually failed; `Get-Service` is the
+  source of truth, not the install script's own exit message.
+- **Kill test**: killed the exact PID NSSM was managing (confirmed via `Get-CimInstance
+  Win32_Service`'s own `ProcessId`, not guessed) from an elevated PowerShell - `Stop-Process`
+  from a non-elevated session, or Task Manager run without elevation, both silently fail against
+  a LocalSystem-owned process, which cost a round of "it still shows the same" confusion before
+  switching to an elevated session found this. Once actually killed: NSSM respawned it under a
+  new PID within seconds, confirmed via a fresh `===== AGENT STARTING =====` entry in
+  `agent.log` and successful re-registration - note that `Get-Service`'s own `Status` field
+  never leaves `Running` during this, by design (NSSM hides the respawn from the Windows SCM),
+  so watching service status is the wrong signal for this test; watch the managed PID and the
+  agent's own log instead.
+- **Reboot test**: a real `Restart` (not `Shut down` + power on, which can resume from
+  hibernation under Fast Startup without a true reboot) - confirmed via `(Get-CimInstance
+  Win32_OperatingSystem).LastBootUpTime` matching the actual reboot time, and a fresh
+  `AGENT STARTING` entry in `agent.log` 24 seconds after boot, no manual start needed.
+- Separately found and fixed during this verification, unrelated to the service/watchdog
+  mechanism itself: this PC's device key had been revoked (`HTTP 401 ... invalid or revoked
+  device key` on every heartbeat, predating today). Rejoined via a fresh one-time code from
+  Contribute Resources on the website, written to `join_code.txt` so `pool_runtime.py::setup()`
+  could pick it up non-interactively (the agent's interactive join prompt needs a TTY, which a
+  Windows service never has) - now registered as `MOEEZ-3` with real, successful heartbeats. The
+  old `MOEEZ-2` node row is now a stale, orphaned entry in the database (different owner on
+  record, so the join logic correctly didn't reuse the name) - harmless, just not cleaned up.
 
 ### 2. Log rotation — done, verified
 `node-agent/agent.py::setup_logging()` had no file handler at all before this - console-only,
@@ -139,14 +165,16 @@ detection at the unit level instead of the node level), genuinely a different tr
 was built here, not attempted.
 
 ## Suggested order (status as of 2026-10-23)
-1. Service + watchdog (NSSM) — script written (item 1), **still not yet run on a real PC**. Do
-   this first: install `nssm.exe`, run `install_service.bat`, confirm it actually restarts the
-   agent on a kill and on reboot. The only item in this whole plan still blocked purely on
-   someone running it.
+1. ~~Service + watchdog (NSSM)~~ — done and verified live (item 1): installed, kill-tested, and
+   reboot-tested on a real PC, all three confirmed with real evidence (PID changes, log entries,
+   boot time), not just "it looks installed."
 2. ~~Log rotation~~ — done and verified (item 2).
 3. ~~Node quarantine~~ — done and verified live (item 3).
 4. ~~Detection latency~~ — the tick-interval half done and tested (item 4); the per-unit-lease
    half still open, a separate decision.
+
+Every item in this plan is now done except the per-unit-lease half of item 4, which was always
+framed as a separate, optional design decision rather than a gap.
 
 ## Testing
 `backend/tests/test_r1_latency.py` (2 tests) locks in item 4's tick intervals directly against
