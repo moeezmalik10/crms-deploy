@@ -23,7 +23,7 @@ This package is your project, ready to deploy:
 2. **Free Render services sleep** after 15 minutes without traffic; the first visit after that takes about a minute. All free services share **750 hours a month**, so close the agents when you're not testing.
 3. **No passwords or keys are in this code.** You type them once into the Render and Vercel dashboards. Still make the GitHub repo **Private**.
 
-**How checking works:** open Command Prompt in `D:\CRMS\crms-deploy\tools` and run `CHECK_DEPLOY.bat <step>`, for example `CHECK_DEPLOY.bat backend`. Move on only when it ends with **PASSED**.
+**How checking works:** open Command Prompt in `D:\CRMS\crms-deploy\tools` and run `CHECK_DEPLOY.bat <step>`, for example `CHECK_DEPLOY.bat backend`. Move on only when it ends with **PASSED**. Valid steps: `files`, `github`, `backend`, `ids`, `website`, `cors`, `nodes` (used through this guide), plus `pool` (checks the separate "Contribute Resources" device-pool feature - device join codes, shared cores/RAM/storage - not covered step by step in this guide, but worth a look if you use it) and `all` (runs everything, including `pool`).
 
 ---
 
@@ -109,26 +109,33 @@ crms-deploy\
    | crms-backend | `SUPABASE_URL` | your Supabase address |
    | crms-backend | `SUPABASE_KEY` | your **service_role** key |
    | crms-backend | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` for now (changed in step 5) |
+   | crms-backend | `IDS_BASE` | leave blank for now - the IDS's own address isn't known until step 3.4 below; set it in step 3.5 |
    | crms-ids | `SUPABASE_URL` | your Supabase address |
    | crms-ids | `SUPABASE_KEY` | your **service_role** key |
+   | crms-ids | `JWT_SECRET_KEY` | the same login secret as crms-backend's, above |
 
 3. Click **Deploy Blueprint**. Wait until both services show **Live** (5–10 minutes the first time).
 4. Open each service and copy its address from the top of its page. Paste them into **`tools\deploy_config.ps1`**: `BackendUrl` for the crms-backend address, `IdsUrl` for the crms-ids address. Save the file.
 
    If a name was taken, Render adds a few letters to the address (e.g. `crms-backend-ab12.onrender.com`). Always copy the real address.
 
+5. Now that you know the real IDS address: open **crms-backend → Environment**, set `IDS_BASE` to your `IdsUrl` (no `/` at the end), and **Save, rebuild and deploy**. Without this, logins are never screened by the IDS server-side - a real gap, not a cosmetic one, and it fails silently (no error anywhere) rather than loudly.
+
 ✅ **Check:**
 - In each service's **Logs** tab, the build shows `Using Python version 3.12…`.
 - `CHECK_DEPLOY.bat backend` → **PASSED**. It opens `/health` and logs in as admin, which proves Render can reach your database.
 - `CHECK_DEPLOY.bat ids` → **PASSED**.
+- Open `<BackendUrl>/health/ids` in a browser - it should say `"result": "OK: crms-backend can reach the IDS"`. If it says `IDS_BASE is empty`, step 5 above didn't take; if it says it can't reach the IDS address, double check `IdsUrl` was copied correctly.
 
 | If it fails | Fix |
 |---|---|
 | Build log shows Python 3.14, or errors building numpy/psycopg2 | On that service, open **Environment**, check that `PYTHON_VERSION` is `3.12.11`, then **Manual Deploy → Deploy latest commit** |
 | Backend: `could not translate host name` / `Tenant or user not found` | `DATABASE_URL` is wrong. Copy it again |
-| Backend `/health` ok, but admin login fails | Run `database\supabase_setup.sql` in Supabase → SQL Editor (it resets the admin password) |
-| IDS: `/blacklisted` fails or says "Invalid API key" | `SUPABASE_URL` or `SUPABASE_KEY` is wrong on crms-ids. It must be the **service_role** key |
-| IDS log: `WARNING: IDS model not available` | The model couldn't be downloaded from Google Drive. The IDS still runs with its SQL-injection and XSS rules, and the check still passes. To use the AI model, put `ids_multiclass_model.pkl` in `ids\ids\`, then commit and push |
+| Backend `/health` ok, but admin login fails | `supabase_setup.sql` deliberately no longer resets an existing admin's password (so a later re-run, e.g. to pick up a schema change, can never silently wipe a real admin's live password) - re-running it will **not** fix this. Instead, in Supabase → SQL Editor: generate a fresh hash locally with `python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('Admin@12345'))"`, then run `UPDATE public."user" SET password = '<hash printed above>' WHERE email = 'admin@uog.edu.pk';` |
+| IDS: `/blacklisted` fails or says "Invalid API key" | `SUPABASE_URL` or `SUPABASE_KEY` is wrong on crms-ids. It must be the **service_role** key. Open `<IdsUrl>/health/supabase` for a detailed answer (what URL/key it's actually using, Supabase's own reply) without exposing the key itself |
+| Logins succeed even for things that should be screened, or `/health/ids` says `IDS_BASE is empty` | `IDS_BASE` isn't set on crms-backend, or doesn't match the real `IdsUrl` - see step 5 above |
+| `/blacklisted`'s admin-only parts fail, or the IDS dashboard shows the wrong source IP for an attempt | `JWT_SECRET_KEY` on crms-ids doesn't match crms-backend's - they must be the exact same value |
+| IDS log: `WARNING: IDS model not available` | `ids/r2_model.pkl` (committed directly in the repo - nothing downloads at runtime anymore) failed its hash check or didn't come through in the deploy. The IDS still runs with its SQL-injection and XSS rules, and the check still passes either way. Confirm the file is present and unmodified in the `ids/` folder in your GitHub repo, then commit and push again if not |
 
 ---
 

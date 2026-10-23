@@ -82,8 +82,13 @@ function Check-Ids {
         }
     }
     try {
-        $d = Invoke-RestMethod -Method Post -Uri ((U "IdsUrl") + "/detect") -ContentType "application/json" -Body '{"email":"health-check@uog.edu.pk","Destination Port":80,"Flow Duration":100}' -TimeoutSec 100
-        Write-Ok "/detect works (prediction: $($d.prediction))"
+        # A real email/password body, matching what /detect actually reads today (R2's model and
+        # feature extraction key off these two fields - the old CICIDS-era flow-stat fields this
+        # check used to send, like "Destination Port"/"Flow Duration", haven't meant anything
+        # since the model changed, so this now exercises the real pipeline instead of nothing).
+        $d = Invoke-RestMethod -Method Post -Uri ((U "IdsUrl") + "/detect") -ContentType "application/json" -Body '{"email":"health-check@uog.edu.pk","password":"HealthCheck123!"}' -TimeoutSec 100
+        if ($d.prediction -eq "BENIGN") { Write-Ok "/detect works (prediction: BENIGN, as expected for an ordinary login)" }
+        else { Write-Warn "/detect works but flagged an ordinary login as '$($d.prediction)' - worth a look, not necessarily a failure" }
     } catch { Fail "/detect failed: $($_.Exception.Message)" }
 }
 
