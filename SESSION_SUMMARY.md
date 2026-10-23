@@ -618,6 +618,42 @@ step and diagnosing what the resulting evidence actually meant, not performing t
 Every item in `docs/handoff/R1_resilience_plan.md` is now done, except the per-unit-lease half of
 item 4, which was always framed as a separate, optional decision rather than a gap.
 
+## 18. R4: the actual Guacamole SSH relay, verified end to end for the first time
+
+Full writeup in `docs/handoff/R4_sessions_gateway_plan.md` item 2j. This closes out the single
+biggest "written but never run" gap across the whole session - everything built for R4 before
+this was real, tested code, but nothing had ever proven a token actually opens a real SSH session
+through a real Guacamole instance, because this machine had no Docker until now.
+
+- **The workspace image built clean on the first try** - the custom-cont-init.d/custom-services.d
+  hooks worked exactly as documented, confirmed via container logs showing `10-sshd-setup: exited
+  0` and sshd running under s6 supervision.
+- **A real bug found and fixed**: the base image's `abc` user had `/bin/false` as its login
+  shell - a password-authenticated SSH connection would have succeeded and then gone nowhere.
+  Caught by an actual `paramiko` login attempt, not by reading the Dockerfile. Fixed with
+  `usermod -s /bin/bash abc`; rebuilt; a real SSH login then executed `whoami && pwd`
+  successfully using the exact per-session password mechanism production code uses.
+- **Guacamole came up clean**: the `guacamole-auth-json` extension jar was downloaded from
+  Apache's own servers with explicit permission (filename, source, and size stated first) and
+  its SHA-256 verified against Apache's published checksum before use. Images bumped from the
+  originally-planned 1.5.5 to the current stable 1.6.0 now that this was actually being run.
+  Logs confirmed the JSON auth extension loaded and the Postgres schema-sharing trick (predicted
+  in item 2f, based on Docker's populate-on-first-mount behavior for named volumes) worked
+  exactly as expected.
+- **The real test, in three layers**: (1) generated a token with the actual
+  `backend/app/guacamole_gateway.py` code, not a hand-rolled equivalent; (2) POSTed it to
+  Guacamole's real `/api/tokens` REST endpoint and got back a genuine `authToken`, proving
+  Guacamole accepts our own code's output; (3) opened it in the browser pane, which auto-launched
+  a live SSH terminal, and typed `whoami` into the canvas-rendered terminal to get real output
+  (`abc`) back - not just a connected-looking screen, genuine interactivity confirmed visually.
+- **What this does and doesn't prove, stated plainly**: the mechanism itself - token issuance,
+  Guacamole's JSON auth, guacd's SSH relay, the actual production workspace image - now has real
+  evidence behind it for the first time. The outbound-tunnel problem for a real, physically
+  separate lab PC with no inbound ports is **unchanged and still completely open** - this
+  verification only worked because the gateway and the workspace container were on the same
+  machine, which is exactly the assumption that doesn't hold for a real deployment. Different
+  problem, never claimed to be solved by this test.
+
 ## Known gaps / not done in this session
 
 Per the *original* proposal's component breakdown, R2 (explainable IDS) and R4's remote-access
@@ -631,11 +667,14 @@ re-verified or acted on here; flagging rather than assuming.
   left on R2's own scope from the proposal; what's outstanding (the campus-server migration,
   idle detection) belongs to other components.
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
-  R4_sessions_gateway_plan.md`) - started, see §14: VM credential questions verified, a token
-  contract built and tested, a frontend "Connect via SSH" option built and verified live, a local
-  Docker prototype scaffolded but not run (no Docker on this machine). The actual Guacamole
-  relay, the outbound-tunnel problem for a real lab PC, idle detection, and access logging are
-  all still open.
+  R4_sessions_gateway_plan.md`) - the mechanism itself is now done and verified end to end
+  (§14, §18): VM credential questions verified, a token contract built and tested, a frontend
+  "Connect via SSH" option, and - once Docker became available - the actual SSH relay through a
+  real Guacamole instance into the real workspace image, confirmed via a genuinely interactive
+  terminal session. **What's still open is specifically the outbound-tunnel problem for a real,
+  physically separate lab PC with no inbound ports** - this is the one thing the verification
+  above couldn't test (it only worked because the gateway and workspace container shared a
+  machine) and remains the actual production blocker, plus idle detection and access logging.
 
 Also still open:
 - The platform still runs on Render/Vercel/Supabase, not the updated proposal's target

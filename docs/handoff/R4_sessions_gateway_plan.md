@@ -224,3 +224,55 @@ confirmed both paths render correctly - the ready state's link has the exact exp
 just the page text), and the error state shows the backend's message with a working retry. No
 console errors beyond the expected pre-stub connection-refused noise from the page's other,
 unrelated fetches (no real backend running here).
+
+### 2j. The actual end-to-end relay, verified live with Docker (2026-10-24) - this is the big one
+
+Docker became available on this machine (installed by Moeez, same system-level-change boundary as
+the NSSM install). This closed out the single largest "written but never run" gap in all of R4 -
+everything in items 2f-2i was real, tested code, but nothing had ever proven a token actually
+gets a real SSH session through a real Guacamole instance until now.
+
+**The workspace image (`node-agent/pool_runtime.py::WORKSPACE_DOCKERFILE`) - built, run, and a
+real bug found and fixed**: `docker build` succeeded on the first try (the Dockerfile syntax was
+right), and the custom-cont-init.d/custom-services.d hooks worked exactly as the LinuxServer.io
+docs described - `docker logs` showed `10-sshd-setup: exited 0` and sshd running under s6
+supervision. But the first real SSH login attempt (via `paramiko`, password auth) would have
+authenticated successfully and then gone nowhere: the base image's `abc` user has `/bin/false` as
+its login shell - fine for a user that only ever runs code-server as a background process, useless
+for an interactive SSH session. Fixed with one line (`usermod -s /bin/bash abc`) in the Dockerfile.
+Rebuilt, confirmed `abc:x:1000:1000::/config:/bin/bash` in `/etc/passwd`, and a real `paramiko`
+login executed `whoami && pwd` successfully (`abc`, `/config`) using the exact per-session
+password mechanism `start_workspace()` uses.
+
+**Guacamole itself - brought up and it worked cleanly**: `docker compose up -d` (images bumped to
+the current stable 1.6.0 from the originally-planned 1.5.5, now that this was actually being run
+rather than just written). The `guacamole-auth-json` extension jar (not bundled in the Docker
+image, downloaded from `dlcdn.apache.org` with explicit permission, SHA-256 verified against
+Apache's own published checksum before use) loaded alongside the bundled PostgreSQL JDBC auth
+exactly as `GUACAMOLE_HOME/extensions` is documented to work. Logs showed `"Encrypted JSON
+Authentication" (json) loaded` and `"The Apache Guacamole web application has started"` with no
+errors - the Postgres schema-sharing trick via the `guac-jdbc-init` named volume (item 2f's own
+prediction about Docker's populate-on-first-mount behavior) worked exactly as expected too.
+
+**The real test**: generated a token with the actual `backend/app/guacamole_gateway.py` code
+(not a hand-rolled equivalent), pointing at the just-built workspace container's SSH port via
+`host.docker.internal` (guacd runs inside the compose network, the test container was bound to
+the host's own `127.0.0.1`, so this is the one piece of config that's prototype-specific and
+wouldn't carry over to a different topology). `curl --data-urlencode "data=$TOKEN"
+http://localhost:8080/guacamole/api/tokens` returned a real `authToken` with
+`"dataSource":"json"` - Guacamole accepted a token our own code produced, not a hand-crafted
+reference one. `GET .../api/session/data/json/connections` listed the exact connection the token
+specified. Then, in the browser pane, navigating to
+`http://localhost:8080/guacamole/#/?data=<token>` auto-opened the one connection and produced a
+genuinely interactive SSH terminal - confirmed by typing `whoami` into the live canvas-rendered
+terminal and getting `abc` back as real output, not just a connected-looking screen.
+
+**What this proves, concretely**: the entire chain - token issuance code, Guacamole's JSON auth,
+guacd's SSH relay, and the actual production workspace image - works end to end, for the first
+time with real evidence instead of "written against the docs." **What it still doesn't prove**:
+everything already flagged in item 2f's "what's still open" and this file's "real dependency"
+section remains exactly as open as before - `host.docker.internal`/`127.0.0.1` reachability only
+holds because guacd and the workspace container are on the same machine; a real lab PC on a
+different machine, with no inbound ports, still has no solution here. This closes the "does the
+mechanism work at all" question, not the "can this reach a real lab PC" question - those are
+different problems, and only the first one was ever testable without solving the second.

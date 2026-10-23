@@ -59,13 +59,16 @@ WORKSPACE_IMAGE = "crms-workspace:2"
 # baking them in would mean every workspace container ever built from this image shares the
 # same SSH host key, a well-known footgun with Docker images that bundle sshd.
 #
-# Written against that documentation, not run or built here - this dev machine has no Docker
-# installed. Verify the image actually builds and sshd actually comes up before trusting this
-# in anything real; see guacamole/README.md for how to test it once Docker is available.
+# Built and tested against a real Docker install (2026-10-24, see
+# docs/handoff/R4_sessions_gateway_plan.md item 2j) - caught and fixed one real bug this way:
+# the base image's "abc" user has /bin/false as its login shell (fine for running code-server as
+# a process, useless for an interactive SSH session - a real password-authenticated connection
+# would succeed and then close immediately with no shell). usermod -s /bin/bash below fixes it.
 WORKSPACE_DOCKERFILE = f"""FROM {WORKSPACE_BASE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3 python3-pip openssh-server && rm -rf /var/lib/apt/lists/*
 RUN sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \\
     && sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \\
+    && usermod -s /bin/bash abc \\
     && mkdir -p /custom-cont-init.d /custom-services.d
 RUN printf '%s\\n' \\
     '#!/usr/bin/with-contenv bash' \\

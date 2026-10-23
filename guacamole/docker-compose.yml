@@ -21,7 +21,7 @@
 
 services:
   guacd:
-    image: guacamole/guacd:1.5.5
+    image: guacamole/guacd:1.6.0
     container_name: crms-guacd-prototype
     restart: unless-stopped
     networks:
@@ -47,7 +47,7 @@ services:
       - guac
 
   guacamole:
-    image: guacamole/guacamole:1.5.5
+    image: guacamole/guacamole:1.6.0
     container_name: crms-guacamole-prototype
     restart: unless-stopped
     depends_on:
