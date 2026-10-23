@@ -1,4 +1,4 @@
-import { API_BASE } from "../../src/config";
+import { API_BASE, GUACAMOLE_URL } from "../../src/config";
 import { useEffect, useState } from "react";
 
 // Remote Link: shows how to reach the PC of the student's latest Remote session.
@@ -28,6 +28,10 @@ export default function StudentRemoteLink() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(Date.now());
+  // R4's Guacamole gateway (see guacamole/README.md) - idle until the student explicitly asks
+  // for it, not fetched on every 5s poll: a token is only valid for this one session and there's
+  // no point minting a fresh one nobody's about to use.
+  const [ssh, setSsh] = useState({ status: "idle", token: null, error: null });
 
   async function fetchSession() {
     if (!username) return;
@@ -54,6 +58,31 @@ export default function StudentRemoteLink() {
     return () => { clearInterval(interval); clearInterval(tick); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
+
+  // A fetched SSH token is only good for the session it was issued for - drop it the moment
+  // the displayed session changes (a new request, or this one ending), rather than show a
+  // stale token or error next to a different session.
+  useEffect(() => {
+    setSsh({ status: "idle", token: null, error: null });
+  }, [session?.id]);
+
+  const fetchSshToken = async () => {
+    if (!session) return;
+    setSsh({ status: "loading", token: null, error: null });
+    try {
+      const res = await fetch(`${API_BASE}/tasks/${session.id}/guacamole-token`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSsh({ status: "error", token: null, error: data.error || "Could not get an SSH connection" });
+        return;
+      }
+      setSsh({ status: "ready", token: data.token, error: null });
+    } catch {
+      setSsh({ status: "error", token: null, error: "Could not reach the server" });
+    }
+  };
 
   const statusStyles = {
     pending: "bg-orange-100 text-orange-600",
@@ -135,6 +164,42 @@ export default function StudentRemoteLink() {
                 <li>Download anything you want to keep before the time is up: the workspace and its files are deleted when the session ends.</li>
               </ul>
             </div>
+
+            {GUACAMOLE_URL && (
+              <div className="border border-gray-200 rounded-lg p-4 text-sm">
+                <p className="font-semibold mb-2">SSH access (experimental)</p>
+                {ssh.status === "idle" && (
+                  <button
+                    onClick={fetchSshToken}
+                    className="px-4 py-2 bg-gray-800 hover:bg-black text-white rounded-md text-sm"
+                  >
+                    Get SSH connection
+                  </button>
+                )}
+                {ssh.status === "loading" && <p className="text-gray-500">Requesting a connection...</p>}
+                {ssh.status === "error" && (
+                  <>
+                    <p className="text-red-700 mb-2">{ssh.error}</p>
+                    <button
+                      onClick={fetchSshToken}
+                      className="px-4 py-2 bg-gray-800 hover:bg-black text-white rounded-md text-sm"
+                    >
+                      Try again
+                    </button>
+                  </>
+                )}
+                {ssh.status === "ready" && (
+                  <a
+                    href={`${GUACAMOLE_URL}/#/?data=${encodeURIComponent(ssh.token)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block px-4 py-2 bg-gray-800 hover:bg-black text-white rounded-md text-sm"
+                  >
+                    Connect via SSH
+                  </a>
+                )}
+              </div>
+            )}
           </>
         )}
 

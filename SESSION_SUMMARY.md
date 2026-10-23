@@ -525,10 +525,16 @@ Full writeup in `docs/handoff/R4_sessions_gateway_plan.md` item 2g.
   instance actually accepts and relays a token, is not. `guacamole/` has a `docker-compose.yml` +
   `README.md` prototype stack, written against Guacamole's documentation and explicitly marked
   as not run here - for whoever has Docker to verify next.
+- **Frontend "Connect via SSH" option added and verified live** (item 2i): `StudentSessionLink.jsx`
+  now has an on-demand "Get SSH connection" button for a running workspace session, hidden
+  entirely unless a new `VITE_GUACAMOLE_URL` is configured (empty by default - no gateway is
+  deployed yet, so nothing is shown rather than a dead button). Verified via the real Vite dev
+  server with stubbed API responses: the ready state's link has the exact expected
+  `data=`-encoded `href`, the error state shows the backend's own message with a working retry.
 - **Still open, unchanged**: the outbound-tunnel problem for a lab PC with no inbound ports (this
   prototype assumes the gateway and the workspace container share a machine); idle detection;
-  connect/disconnect logging; a frontend "connect via SSH" option; and the campus-server
-  migration decision this has never depended on to get this far.
+  connect/disconnect logging; and the campus-server migration decision this has never depended on
+  to get this far.
 
 ## 15. R2's SHAP integration - done, verified live
 
@@ -560,6 +566,24 @@ Full writeup in `docs/handoff/R2_explainable_ids_plan.md` item 2h.
   dominating the explanation once the burst was underway - a legible, plausible "why," not
   arbitrary numbers.
 
+## 16. R1 item 4: detection-to-recovery latency tightened (the lower-risk half)
+
+Full writeup in `docs/handoff/R1_resilience_plan.md` item 4.
+
+Of the two options the plan laid out - shrink the scheduler's tick intervals, or build a genuine
+per-unit lease - took the first, the one the plan itself already called the safer default.
+`backend/app/tasks.py`'s `cleanup_system` and `process_queue` now both tick every 5s (was 30s and
+15s). The 60s heartbeat-timeout threshold itself is deliberately **unchanged** - shrinking it
+would reintroduce the false-failure-alarm problem the agent registration retry-timing fix (§1)
+just solved, and the plan explicitly warned against touching it. Worst-case detection-to-recovery
+latency drops from 105s to **70s** - reported as the real number, not rounded down to "within
+60s": the 60s heartbeat timeout alone already consumes the proposal's entire target budget, so
+the literal figure isn't reachable without touching that threshold, which this deliberately
+didn't do. Locked in with two new tests (`backend/tests/test_r1_latency.py`) asserting both tick
+intervals directly against the scheduler's own registered jobs - not just the source, so a future
+change can't silently widen the budget back out unnoticed. Full backend suite: **126 tests**, all
+passing. The per-unit-lease option remains open, a genuinely separate design decision.
+
 ## Known gaps / not done in this session
 
 Per the *original* proposal's component breakdown, R2 (explainable IDS) and R4's remote-access
@@ -574,9 +598,10 @@ re-verified or acted on here; flagging rather than assuming.
   idle detection) belongs to other components.
 - Secure remote-access gateway (Apache Guacamole) for off-campus sessions (R4, `docs/handoff/
   R4_sessions_gateway_plan.md`) - started, see §14: VM credential questions verified, a token
-  contract built and tested, a local Docker prototype scaffolded but not run (no Docker on this
-  machine). The actual Guacamole relay, the outbound-tunnel problem for a real lab PC, idle
-  detection, and access logging are all still open.
+  contract built and tested, a frontend "Connect via SSH" option built and verified live, a local
+  Docker prototype scaffolded but not run (no Docker on this machine). The actual Guacamole
+  relay, the outbound-tunnel problem for a real lab PC, idle detection, and access logging are
+  all still open.
 - Pool consolidation credit (issue #1) and node quarantine credit (issue #2) were both opened
   under the old, multi-member team structure — see §12.
 
@@ -585,8 +610,8 @@ Also still open:
   self-hosted campus server (Ubuntu, Docker microservices behind Nginx, PostgreSQL, MinIO,
   Guacamole) — a full infrastructure migration, not attempted here.
 - R1 item 1 (Windows service/watchdog) needs a real run to verify — see §12.
-- R1 item 4 (detection-to-recovery latency) not started — see `docs/handoff/
-  R1_resilience_plan.md`.
+- R1 item 4 (detection-to-recovery latency) - tick-interval half done, see §16; the per-unit-lease
+  half still open, a separate design decision.
 
-Closed in §10/§12, previously listed here: the per-student quota ledger table, the scheduler's
+Closed in §10/§12/§16, previously listed here: the per-student quota ledger table, the scheduler's
 lack of a structural fairness guarantee, R1's log rotation, and R1's quarantine admin-UI scope.

@@ -8,7 +8,19 @@ from app.allocation_engine import (
 
 METRICS_HISTORY_DAYS = 7
 
-@scheduler.task('interval', id='process_queue', seconds=15) # Increased to 15s
+# R1 item 4 (docs/handoff/R1_resilience_plan.md): the proposal's "resumes elsewhere within 60
+# seconds" has a worst-case latency of (heartbeat timeout) + (next cleanup_system tick) +
+# (next process_queue tick) - a node going dead right after a cleanup_system tick, and its
+# requeued work landing right after a process_queue tick, both wait a full tick before anything
+# notices. The 60s heartbeat-timeout threshold itself (cleanup_system's own timeout_limit,
+# below) is deliberately left untouched - shrinking it would reintroduce false failure alarms,
+# the exact problem the agent registration retry-timing fix (SESSION_SUMMARY.md §1) just solved.
+# Both tick intervals were cut instead (30s/15s -> 5s each): the two queries cleanup_system and
+# process_queue run are cheap, indexed, and over a handful of rows at this project's scale, so
+# five-second polling costs little; it cuts the worst case from 60+30+15=105s to 60+5+5=70s -
+# the honest number, not a claim of meeting "within 60s" outright, which isn't achievable without
+# touching the heartbeat threshold itself.
+@scheduler.task('interval', id='process_queue', seconds=5)
 def process_queue():
     with scheduler.app.app_context():
         try:
@@ -42,7 +54,7 @@ def process_queue():
         finally:
             db.session.remove() # Releases the DB connection back to the pool
 
-@scheduler.task('interval', id='cleanup_system', seconds=30)
+@scheduler.task('interval', id='cleanup_system', seconds=5)  # see process_queue's own comment above
 def cleanup_system():
     with scheduler.app.app_context():
         now = datetime.now(timezone.utc)
@@ -68,7 +80,8 @@ def cleanup_system():
             task.message = f"Re-queued after {was} timeout (agent did not respond)."
             print(f"Task {task.id} re-queued after allocation timeout.")
 
-        # Fail tasks on 'Ghost Nodes' (Agent stopped heartbeating)
+        # Fail tasks on 'Ghost Nodes' (Agent stopped heartbeating). 60s, deliberately unchanged -
+        # see the latency-budget comment on process_queue above for why.
         timeout_limit = now - timedelta(seconds=60)
         dead_nodes = Node.query.filter(Node.status == "online", Node.last_heartbeat < timeout_limit).all()
 

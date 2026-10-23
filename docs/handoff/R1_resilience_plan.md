@@ -107,33 +107,49 @@ read `_consolidate` before deciding what to change.
 - Verified live: deployed, confirmed clean in Render's logs, and a real temporary test node was
   driven through 3 real outages against production with no errors (`SESSION_SUMMARY.md` §10).
 
-### 4. Tighten the detection-to-recovery latency (shared with R3, worth discussing together)
-The proposal's "resumes... within 60 seconds" currently has worst-case latency closer to 90–105s
-(60s heartbeat timeout + up to 30s until the next `cleanup_system` tick + up to 15s until the
-next `process_queue` tick picks the requeued work back up). Tightening this without reintroducing
-false positives (the thing that was *just* fixed — see `SESSION_SUMMARY.md` §1, the agent
-registration retry timing bug) needs a real design decision, not a blind timeout reduction. Two
-honest options, worth a conversation with R3:
-- Shrink `cleanup_system`'s own tick interval (currently 30s) without touching the 60s
-  heartbeat-timeout threshold itself — cuts detection latency without touching false-positive
-  tolerance.
+### 4. Tighten the detection-to-recovery latency — partially done (the lower-risk half)
+The proposal's "resumes... within 60 seconds" had worst-case latency of 90–105s (60s heartbeat
+timeout + up to 30s until the next `cleanup_system` tick + up to 15s until the next
+`process_queue` tick picks the requeued work back up). Two honest options were on the table:
+- Shrink `cleanup_system`'s own tick interval without touching the 60s heartbeat-timeout
+  threshold itself — cuts detection latency without touching false-positive tolerance.
 - A genuine per-unit lease (not just node-level heartbeat) — the proposal's Component 5 mentions
-  this ("processed under a lease by the node agent") as a job-engine concept; whether it's worth
-  building as a separate, shorter-timeout mechanism is a real tradeoff to weigh, not something to
-  default into.
+  this ("processed under a lease by the node agent") as a job-engine concept; a real tradeoff to
+  weigh, not something to default into.
 
-## Suggested order (status as of 2026-10-21)
-1. ~~Service + watchdog (NSSM)~~ — script written (item 1), **not yet run on a real PC**. Do
+**Took the first option, not the second** - it's the one the original framing above already
+called the safer default, and it needed no new mechanism, just two numbers. `cleanup_system` and
+`process_queue` (`backend/app/tasks.py`) now both tick every 5s (was 30s/15s) - the 60s
+heartbeat-timeout threshold is deliberately **unchanged**, so the agent-registration-retry fix's
+false-positive protection (`SESSION_SUMMARY.md` §1) isn't reintroduced. Both queries are cheap
+(indexed, a handful of rows at this project's scale), so five-second polling has little real
+cost. **New worst case: 60 + 5 + 5 = 70s** — reported honestly, not rounded down to "within 60s":
+the 60s heartbeat timeout alone already consumes the entire target budget, so hitting the literal
+60s figure isn't possible without shrinking that threshold, which this deliberately did not do.
+Locked in with `backend/tests/test_r1_latency.py` (asserts both tick intervals directly against
+the scheduler's own registered jobs, not just the source) so a future change can't silently widen
+the budget back out unnoticed.
+
+**The per-unit lease option is still open** - a bigger, separate mechanism (shorter-timeout
+detection at the unit level instead of the node level), genuinely a different tradeoff than what
+was built here, not attempted.
+
+## Suggested order (status as of 2026-10-23)
+1. Service + watchdog (NSSM) — script written (item 1), **still not yet run on a real PC**. Do
    this first: install `nssm.exe`, run `install_service.bat`, confirm it actually restarts the
-   agent on a kill and on reboot.
+   agent on a kill and on reboot. The only item in this whole plan still blocked purely on
+   someone running it.
 2. ~~Log rotation~~ — done and verified (item 2).
 3. ~~Node quarantine~~ — done and verified live (item 3).
-4. Revisit detection latency (item 4) once #1 is confirmed working for real.
+4. ~~Detection latency~~ — the tick-interval half done and tested (item 4); the per-unit-lease
+   half still open, a separate decision.
 
 ## Testing
-`backend/tests/test_node_quarantine.py` (15 tests) covers node quarantine — counter
-increment/reset, the stability-window streak logic, scheduling exclusion, and the admin-UI
-clear-quarantine endpoints. No existing tests cover the service/watchdog layer (can't
+`backend/tests/test_r1_latency.py` (2 tests) locks in item 4's tick intervals directly against
+the scheduler's own registered jobs. `backend/tests/test_node_quarantine.py` (15 tests) covers
+node quarantine — counter increment/reset, the stability-window streak logic, scheduling
+exclusion, and the admin-UI clear-quarantine endpoints. No existing tests cover the
+service/watchdog layer (can't
 meaningfully unit-test an actual Windows service in CI). See `backend/tests/test_r3_resilience.py`
 for the existing style/patterns to match (fixtures, `make_node`, directly calling
 `cleanup_system()`/`allocate_task()` rather than going through HTTP where a test doesn't need to).

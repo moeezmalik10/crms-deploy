@@ -195,7 +195,29 @@ further.
 lab PC with no inbound ports (this prototype assumes `guacd` and the workspace container are on
 the same machine - true for a dev-box prototype, not true for a real lab PC); idle detection;
 connect/disconnect access logging (Guacamole's own connection history needs a real JDBC user
-database, not just JSON auth alone - not yet checked whether that's needed or how it'd combine);
-and any frontend change so students see an "SSH via Guacamole" option. The campus-server
-migration question (whether this ever runs anywhere but a dev box) is still nobody's explicit
-decision - unchanged from this plan's original framing.
+database, not just JSON auth alone - not yet checked whether that's needed or how it'd combine).
+The campus-server migration question (whether this ever runs anywhere but a dev box) is still
+nobody's explicit decision - unchanged from this plan's original framing.
+
+### 2i. Frontend: a "Connect via SSH" option, verified live
+
+`StudentSessionLink.jsx` now has an "SSH access (experimental)" section for a running workspace
+session - a button that calls `GET /tasks/<id>/guacamole-token` on demand (not on every 5s poll;
+a token is only good for the one session, no point minting one nobody's about to use), then
+either an error (the backend's own message - "no SSH target yet", "not running", etc. - with a
+"Try again" button) or a "Connect via SSH" link to
+`${VITE_GUACAMOLE_URL}/#/?data=<url-encoded token>`, Guacamole's own documented way to open a
+session from a query parameter.
+
+The whole section only renders when `VITE_GUACAMOLE_URL` (new, `frontend/src/config.js` +
+`.env.example`) is set - empty/unset, the default, means "no gateway deployed yet" and the
+section doesn't appear at all, rather than showing students a button that can't work. Anyone
+running the local prototype (`guacamole/`) end to end sets it in their own `frontend/.env`.
+
+**Verified live**, the same way as item 2h's dashboard change: ran the real Vite dev server,
+stubbed `/tasks/my/<username>` and `/tasks/<id>/guacamole-token` in the browser console, and
+confirmed both paths render correctly - the ready state's link has the exact expected
+`href` (`data` URL-encoded correctly, confirmed via the browser's own accessibility tree, not
+just the page text), and the error state shows the backend's message with a working retry. No
+console errors beyond the expected pre-stub connection-refused noise from the page's other,
+unrelated fetches (no real backend running here).
