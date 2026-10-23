@@ -602,8 +602,6 @@ re-verified or acted on here; flagging rather than assuming.
   Docker prototype scaffolded but not run (no Docker on this machine). The actual Guacamole
   relay, the outbound-tunnel problem for a real lab PC, idle detection, and access logging are
   all still open.
-- Pool consolidation credit (issue #1) and node quarantine credit (issue #2) were both opened
-  under the old, multi-member team structure — see §12.
 
 Also still open:
 - The platform still runs on Render/Vercel/Supabase, not the updated proposal's target
@@ -615,3 +613,6 @@ Also still open:
 
 Closed in §10/§12/§16, previously listed here: the per-student quota ledger table, the scheduler's
 lack of a structural fairness guarantee, R1's log rotation, and R1's quarantine admin-UI scope.
+Also closed: pool consolidation credit (issue #1, resolved Oct 19, 2026 as shared credit between
+R3 and R4) and node quarantine credit (issue #2, resolved Oct 20, 2026 - the updated proposal's
+sole-author structure supersedes the original credit question) — see §12.

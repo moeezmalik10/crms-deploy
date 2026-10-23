@@ -5,7 +5,8 @@
 across all of R1-R4 (Table 0, Table 12) - no other names appear in it. This doc's "for Areej"
 framing below is historical context for how it was written, not the current team structure;
 items 1-3 are now implemented as Moeez's own work (see their entries below for what's verified
-vs. not). Issues #1 and #2 predate this and should be revisited.
+vs. not). Issues #1 and #2 predate this and are now both resolved and closed - see item 3's own
+note below.
 **Written by:** an AI assistant working with Muhammad Moeez on his own R3 scope, at his request, as
 a starting point for you — not a substitute for your own work. Everything here is a plan to
 review, adjust, and implement yourself; nothing in this file has been coded for you.
@@ -30,7 +31,7 @@ only the interrupted unit is repeated; false failure alarms reduced by 90%+.
 ## What's already done (so you don't duplicate it)
 
 - Heartbeat-timeout detection exists: `backend/app/tasks.py::cleanup_system`, 60s timeout,
-  checked every 30s.
+  checked every 5s (tightened from 30s as part of item 4 below).
 - Job-mode (divisible) work now correctly requeues when its node drops, even mid-run — this was
   a real bug fixed this session (`backend/app/allocation_engine.py::release_node_tasks`). See
   `backend/tests/test_r3_resilience.py` for the test coverage and the bug writeup in
@@ -41,11 +42,14 @@ only the interrupted unit is repeated; false failure alarms reduced by 90%+.
 - Node-agent registration retry timing was fixed (8 tries over 120s, matching Render's cold-start
   window) — `node-agent/agent.py`.
 - **Node quarantine (item 3 below) is now built and live** — at Moeez's explicit request, ahead
-  of your own work on this component, the same situation as pool consolidation (see
-  [issue #2](https://github.com/moeezmalik10/crms-deploy/issues/2) for the credit discussion,
-  parallel to [issue #1](https://github.com/moeezmalik10/crms-deploy/issues/1) for consolidation).
-  It's yours to review, take ownership of, and extend — not a to-do. Details moved to "Already
-  done" status under item 3 itself, below.
+  of your own work on this component, the same situation as pool consolidation. Both raised as
+  credit questions for the team and now both **resolved and closed**:
+  [issue #2](https://github.com/moeezmalik10/crms-deploy/issues/2) (node quarantine, closed
+  Oct 20, 2026 - the updated sole-author proposal supersedes the original question, no separate
+  teammate's graded work is at stake) and
+  [issue #1](https://github.com/moeezmalik10/crms-deploy/issues/1) (pool consolidation, closed
+  Oct 19, 2026 - shared credit between R3 and R4). It's yours to review, take ownership of, and
+  extend — not a to-do. Details moved to "Already done" status under item 3 itself, below.
 
 **What this means for scope:** the lease/checkpoint mechanics for divisible work, and quarantine,
 are built. Your remaining work is the rest of the **PC-level** half: making the agent itself

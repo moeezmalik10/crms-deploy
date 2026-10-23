@@ -7,10 +7,13 @@ review, adjust, and implement yourself; nothing in this file has been coded for 
 
 **Why consolidation is in this plan too:** the updated proposal's team-area table (Table 11)
 credits pool consolidation to R4, but it was actually built under R3 earlier in this project
-(with explicit approval at the time, before the proposal was rewritten). See
-https://github.com/moeezmalik10/crms-deploy/issues/1 for the open discussion with the team about
-how that should be credited. Regardless of how that's resolved, you should understand and be able
-to maintain/extend that code if it's going to be presented as part of your component — this
+(with explicit approval at the time, before the proposal was rewritten).
+https://github.com/moeezmalik10/crms-deploy/issues/1 was opened to raise this with the team and
+is now **resolved and closed** (Oct 19, 2026) - shared credit between R3 and R4, code unchanged.
+A follow-up comment (Oct 20, 2026) notes the proposal was further updated since to list Muhammad
+Moeez as sole author across R1-R4, which doesn't reopen the question so much as make it moot -
+there's no longer a separate teammate whose graded work is at stake. You should still understand
+and be able to maintain/extend this code if it's presented as part of your component — this
 plan's first section is a guided tour of what's already there, not a to-do.
 
 ---
